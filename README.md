@@ -14,7 +14,7 @@
 - 深色现代化界面（ttk clam 定制主题，纯标准库，兼容 Win7）
 - 程序统计：X/Y/Z 行程、S/F 范围、G 次数等关键指标 + 详情二级窗口
 - F 进给趋势曲线：按 F 档位着色的折线图二级窗口
-- 程序逐行运行：连续播放/单步/直达/演示到行（动画）
+- 程序逐行运行：连续播放/单步/直达/演示到行（画布逐行画出刀路）
 
 ## 文档
 
@@ -59,7 +59,7 @@ nc-viewer
 python -m pytest
 ```
 
-共 59 例：解析（33）+ 几何（7）+ 界面结构（19）。遵循 TDD，改动后需全绿（green）再打包。
+共 61 例：解析（33）+ 几何（7）+ 界面结构（21）。遵循 TDD，改动后需全绿（green）再打包。
 
 ## 打包 EXE
 
@@ -82,7 +82,7 @@ NCodeViewer/
 │   ├── theme.py          # 深色现代化主题（配色/字体常量 + apply_theme）
 │   ├── viewer.py         # Tkinter 主窗口
 │   └── __main__.py       # python -m nc_viewer 入口
-├── tests/                # pytest 单元测试（59 例）
+├── tests/                # pytest 单元测试（61 例）
 │   ├── test_parser.py
 │   ├── test_geometry.py
 │   └── test_viewer_ui.py

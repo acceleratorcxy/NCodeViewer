@@ -159,6 +159,12 @@ def test_playback_controls_present(app):
     assert _find(app, "直达行"), "缺少直达行按钮"
 
 
+def test_playback_controls_under_canvas(app):
+    """播放控制条位于画布下方 (与画布同属 cv_frame)"""
+    btn = _find(app, "复位")[0]
+    assert btn.master.master == app.canvas.master
+
+
 def test_set_target_does_not_move_position(app, tmp_path):
     """点击选中目标行: 目标记录且高亮, 执行位置不动"""
     p = tmp_path / "t.nc"
@@ -182,11 +188,11 @@ def test_run_to_target_instant(app, tmp_path):
 
 
 def test_demo_step_size_adaptive():
-    """演示自适应步长: 长距离大步推进, 已过/到达停止"""
-    assert NCViewer._demo_step_size(100, 0) == 1
-    assert NCViewer._demo_step_size(5000, 0) == 62
-    assert NCViewer._demo_step_size(50, 100) <= 0
-    assert NCViewer._demo_step_size(50, 50) <= 0
+    """演示步长: 距离 1/80 向上取整, 已过/到达停止"""
+    assert NCViewer._demo_step_size(100, 0) == 2
+    assert NCViewer._demo_step_size(5000, 0) == 63
+    assert NCViewer._demo_step_size(50, 100) == 0
+    assert NCViewer._demo_step_size(50, 50) == 0
 
 
 def test_set_current_line_animate_light_path(app, tmp_path):
@@ -196,3 +202,20 @@ def test_set_current_line_animate_light_path(app, tmp_path):
     app.open_file(str(p))
     app.set_current_line(2, animate=True)
     assert app.current_line == 2
+
+
+def test_trace_draws_progressively(app, tmp_path):
+    """轨迹渐进: 画布从空白起按行画刀路, 后退整段重绘"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    assert len(app.canvas.find_withtag("path")) == 0
+    app.set_current_line(1, animate=True)     # G1 F1000 -> 1 段
+    assert len(app.canvas.find_withtag("path")) == 1
+    app.set_current_line(2, animate=True)     # G2 F2000 新色 -> 2 段
+    assert len(app.canvas.find_withtag("path")) == 2
+    app.set_current_line(3, animate=True)     # G0 灰色 -> 3 段
+    assert len(app.canvas.find_withtag("path")) == 3
+    app.set_current_line(1, animate=True)     # 后退 -> 重绘回 1 段
+    assert len(app.canvas.find_withtag("path")) == 1

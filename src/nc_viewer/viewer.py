@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import bisect
 import math
 import os
 import sys
@@ -100,6 +101,11 @@ class NCViewer(tk.Tk):
         self._play_mode = None
         self._play_job = None
         self._target_line = None         # 点击代码行选中的目标行
+        # 轨迹渐进显示: 播放/演示时画布从空白起逐行绘制刀路
+        self._trace_active = False
+        self._trace_drawn = 0            # 已绘制的移动数
+        self._trace_items = []           # [(color, item_id, coords_flat)]
+        self._move_lines = []            # 每条的 line_number, 供 bisect 定位
 
         self._build_ui()
         self._bind_canvas()
@@ -159,6 +165,31 @@ class NCViewer(tk.Tk):
         upper.add(cv_frame, weight=3)
         self.canvas = tk.Canvas(cv_frame, bg=theme.CANVAS_BG, highlightthickness=0)
         self.canvas.pack(side="top", fill="both", expand=True)
+
+        # 播放控制条 (逐行运行): 连续播放 / 单步 / 直达 / 演示
+        ctl = ttk.Frame(cv_frame, padding=(4, 4), style="Panel.TFrame")
+        ctl.pack(side="bottom", fill="x")
+        ttk.Button(ctl, text="复位", command=self._reset_line).pack(side="left")
+        ttk.Button(ctl, text="◀ 上一步",
+                   command=lambda: self._step_line_ctl(-1)).pack(side="left", padx=(6, 0))
+        self.play_btn = ttk.Button(ctl, text="▶ 播放", style=theme.BTN_ACCENT,
+                                   command=self._play_toggle)
+        self.play_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(ctl, text="下一步 ▶",
+                   command=lambda: self._step_line_ctl(1)).pack(side="left", padx=(6, 0))
+        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(ctl, text="速度:", style="Panel.TLabel").pack(side="left")
+        self.speed_cb = ttk.Combobox(ctl, values=("慢", "中", "快"), width=4, state="readonly")
+        self.speed_cb.set("中")
+        self.speed_cb.pack(side="left", padx=(2, 0))
+        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(ctl, text="直达行",
+                   command=lambda: self._run_to_target(False)).pack(side="left")
+        ttk.Button(ctl, text="演示到行",
+                   command=lambda: self._run_to_target(True)).pack(side="left", padx=(6, 0))
+        self.target_lbl = ttk.Label(ctl, text="目标行: -", style="Panel.TLabel")
+        self.target_lbl.pack(side="left", padx=(10, 0))
+
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
 
@@ -268,30 +299,6 @@ class NCViewer(tk.Tk):
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
 
-        # 播放控制条 (逐行运行): 连续播放 / 单步 / 直达 / 演示
-        ctl = ttk.Frame(code_frame, padding=(4, 4), style="Panel.TFrame")
-        ctl.pack(side="bottom", fill="x")
-        ttk.Button(ctl, text="复位", command=self._reset_line).pack(side="left")
-        ttk.Button(ctl, text="◀ 上一步",
-                   command=lambda: self._step_line_ctl(-1)).pack(side="left", padx=(6, 0))
-        self.play_btn = ttk.Button(ctl, text="▶ 播放", style=theme.BTN_ACCENT,
-                                   command=self._play_toggle)
-        self.play_btn.pack(side="left", padx=(6, 0))
-        ttk.Button(ctl, text="下一步 ▶",
-                   command=lambda: self._step_line_ctl(1)).pack(side="left", padx=(6, 0))
-        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Label(ctl, text="速度:", style="Panel.TLabel").pack(side="left")
-        self.speed_cb = ttk.Combobox(ctl, values=("慢", "中", "快"), width=4, state="readonly")
-        self.speed_cb.set("中")
-        self.speed_cb.pack(side="left", padx=(2, 0))
-        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Button(ctl, text="直达行",
-                   command=lambda: self._run_to_target(False)).pack(side="left")
-        ttk.Button(ctl, text="演示到行",
-                   command=lambda: self._run_to_target(True)).pack(side="left", padx=(6, 0))
-        self.target_lbl = ttk.Label(ctl, text="目标行: -", style="Panel.TLabel")
-        self.target_lbl.pack(side="left", padx=(10, 0))
-
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
         self.canvas.bind("<B1-Motion>", self._pan_move)
@@ -390,6 +397,9 @@ class NCViewer(tk.Tk):
         self._search_idx = -1
         # 重置逐行运行状态
         self._stop_playback()
+        self._trace_active = False
+        self._trace_drawn = 0
+        self._trace_items = []
         self._target_line = None
         self.target_lbl.config(text="目标行: -")
         self.file_lbl.config(text=os.path.basename(path))
@@ -700,6 +710,7 @@ class NCViewer(tk.Tk):
         self.render()
 
     def render(self):
+        self._trace_active = False        # 全量渲染即退出轨迹演示
         self.canvas.delete("all")
         if not self.result or not self.result.moves:
             return
@@ -938,10 +949,12 @@ class NCViewer(tk.Tk):
         self.set_current_line(ln)
 
     def set_current_line(self, ln, animate=False):
-        """定位到指定行。animate=True 时走轻量路径 (只更新当前行标记,
-        不重画整幅刀路), 供播放/演示逐帧使用。"""
+        """定位到指定行。animate=True 时走轻量路径 (轨迹渐进 + 只更新
+        当前行标记, 不重画整幅刀路), 供播放/演示逐帧使用。"""
         self.current_line = ln
         if animate:
+            if self._trace_active:
+                self._trace_draw_to_line(ln)
             self.canvas.delete("cur", "curseg")
             self._draw_current()
         else:
@@ -1043,12 +1056,15 @@ class NCViewer(tk.Tk):
         return {"慢": 80, "中": 40, "快": 10}[self.speed_cb.get()]
 
     def _play_toggle(self):
-        """▶ 播放 / 暂停 切换 (连续播放)"""
+        """▶ 播放 / 暂停 切换 (连续播放, 画布从空白起逐行画刀路)"""
         if not self.result:
             return
         if self._play_mode is not None:
             self._stop_playback()
             return
+        if not self._trace_active:
+            self._trace_begin()
+            self.current_line = 0
         self._play_mode = "play"
         self.play_btn.config(text="暂停")
         self._play_tick()
@@ -1065,22 +1081,29 @@ class NCViewer(tk.Tk):
         self._play_job = self.after(self._play_speed_ms(), self._play_tick)
 
     def _step_line_ctl(self, delta):
-        """单步前进/后退"""
+        """单步前进/后退 (轨迹演示模式)"""
         if not self.result:
             return
         self._stop_playback()
+        if not self._trace_active:
+            self._trace_begin()
+            self.current_line = 0
         base = self.current_line if self.current_line else 0
         ln = max(1, min(len(self.lines), base + delta))
-        self.set_current_line(ln)
+        self.set_current_line(ln, animate=True)
 
     def _reset_line(self):
         if not self.result:
             return
         self._stop_playback()
-        self.set_current_line(1)
+        if not self._trace_active:
+            self._trace_begin()
+        self.current_line = 0
+        self.set_current_line(1, animate=True)
 
     def _run_to_target(self, animated):
-        """运行到选中目标行: animated=True 演示(动画), False 直接后台运算"""
+        """运行到选中目标行: animated=True 演示(动画逐帧画刀路),
+        False 无动态直接后台运算到该行 (轨迹一次性画到目标)"""
         if not self.result:
             return
         target = self._target_line
@@ -1088,34 +1111,92 @@ class NCViewer(tk.Tk):
             messagebox.showinfo("提示", "请先在代码列表中点击选中目标行")
             return
         self._stop_playback()
+        if not self._trace_active:
+            self._trace_begin()
+            self.current_line = 0
         if not animated:
-            self.set_current_line(target)          # 无动态: 直接运算到该行
+            self.set_current_line(target, animate=True)   # 无动态: 直接画到该行
             return
         self._demo_target = target                 # 有动态: 逐帧演示推进
+        cur = self.current_line if self.current_line else 0
+        self._demo_step = self._demo_step_size(target, cur)   # 恒定步长
         self._play_mode = "demo"
         self.play_btn.config(text="暂停")
         self._demo_tick()
 
     @staticmethod
     def _demo_step_size(target, cur):
-        """演示自适应步长: 任意距离 ≤80 帧到达; 已到达/已越过返回 0 (停止)"""
+        """演示起始步长: 剩余距离的 1/80 向上取整 (至少 1), 全程恒定,
+        保证 ≤80 帧精确到达; 已到达/已越过返回 0 (停止)"""
         dist = target - cur
         if dist <= 0:
             return 0
-        return max(1, dist // 80)
+        return max(1, (dist + 79) // 80)
 
     def _demo_tick(self):
         if self._play_mode != "demo":
             return
         cur = self.current_line if self.current_line else 0
-        step = self._demo_step_size(self._demo_target, cur)
-        if step <= 0:
-            self.set_current_line(self._demo_target)
+        if cur >= self._demo_target:
+            self.set_current_line(self._demo_target, animate=True)
             self._stop_playback()
             return
-        ln = min(cur + step, self._demo_target)
+        ln = min(cur + self._demo_step, self._demo_target)
         self.set_current_line(ln, animate=True)
         self._play_job = self.after(self._play_speed_ms(), self._demo_tick)
+
+    # ------------- 轨迹渐进绘制 (播放/演示时刀路逐行画出) -------------
+    def _trace_begin(self):
+        """开始轨迹演示: 清空已绘刀路, 从零开始按行绘制"""
+        self.canvas.delete("path")
+        self._trace_active = True
+        self._trace_drawn = 0
+        self._trace_items = []
+        self._move_lines = [m.line_number for m in self.result.moves]
+        self._draw_axes()
+
+    def _trace_draw_to_line(self, ln):
+        """把轨迹绘制到"执行到 ln 行时"已完成的移动"""
+        k = bisect.bisect_right(self._move_lines, ln) - 1
+        self._trace_draw_to(k)
+
+    def _trace_draw_to(self, k):
+        """增量绘制移动 0..k (前进追加, 后退整段重绘)"""
+        if k < self._trace_drawn:
+            for _, item, _ in self._trace_items:
+                self.canvas.delete(item)
+            self._trace_items = []
+            self._trace_drawn = 0
+        moves = self.result.moves
+        show_g0 = self.show_g0.get()
+        w, x, y, z = self.quat
+        scale, ox, oy = self.scale, self.offset[0], self.offset[1]
+        for i in range(self._trace_drawn, k + 1):
+            m = moves[i]
+            if m.motion == "G0" and not show_g0:
+                continue
+            color = color_of_move(m, self.palette)
+            coords = []
+            for px, py, pz in self._disp3d[i]:
+                tx = 2 * (y * pz - z * py)
+                ty = 2 * (z * px - x * pz)
+                tz = 2 * (x * py - y * px)
+                vx = px + w * tx + (y * tz - z * ty)
+                vy = py + w * ty + (z * tx - x * tz)
+                coords.append(vx * scale + ox)
+                coords.append(-vy * scale + oy)
+            if not coords:
+                continue
+            if self._trace_items and self._trace_items[-1][0] == color:
+                item, flat = self._trace_items[-1][1], self._trace_items[-1][2]
+                flat.extend(coords[2:])          # 跳过与上条共用的衔接点
+                self.canvas.coords(item, *flat)
+            else:
+                item = self.canvas.create_line(coords, fill=color, width=1,
+                                               joinstyle="round", capstyle="round",
+                                               tags="path")
+                self._trace_items.append([color, item, list(coords)])
+        self._trace_drawn = max(self._trace_drawn, k + 1)
 
 
 def main():
