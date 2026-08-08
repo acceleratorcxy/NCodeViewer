@@ -59,7 +59,7 @@ nc-viewer
 python -m pytest
 ```
 
-共 61 例：解析（33）+ 几何（7）+ 界面结构（21）。遵循 TDD，改动后需全绿（green）再打包。
+共 63 例：解析（33）+ 几何（7）+ 界面结构（23）。遵循 TDD，改动后需全绿（green）再打包。
 
 ## 打包 EXE
 
@@ -82,7 +82,7 @@ NCodeViewer/
 │   ├── theme.py          # 深色现代化主题（配色/字体常量 + apply_theme）
 │   ├── viewer.py         # Tkinter 主窗口
 │   └── __main__.py       # python -m nc_viewer 入口
-├── tests/                # pytest 单元测试（61 例）
+├── tests/                # pytest 单元测试（63 例）
 │   ├── test_parser.py
 │   ├── test_geometry.py
 │   └── test_viewer_ui.py
