@@ -263,9 +263,9 @@ class NCViewer(tk.Tk):
         self.legend = ttk.Frame(inner, style="Panel.TFrame")
         self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
 
-        # 程序统计: 贴在侧栏底部 (滚动区上方只剩图例)
-        st = ttk.LabelFrame(side, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        # 程序统计 (滚动区第 2 节, 固定大小)
+        st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
+        st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -283,9 +283,9 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行, 贴在程序统计下方)
-        posf = ttk.LabelFrame(side, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行, 滚动区第 3 节)
+        posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
+        posf.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
         for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行")):
@@ -310,9 +310,9 @@ class NCViewer(tk.Tk):
                                           highlightcolor=theme.ACCENT)
         self.pos_fields["本行"].grid(row=7, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
-        # 刀具栏: 贴住侧栏底部
-        tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=3, column=0, columnspan=2, sticky="sew")
+        # 刀具栏 (滚动区第 4 节, 固定大小)
+        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
+        tbar.grid(row=4, column=0, sticky="ew")
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
