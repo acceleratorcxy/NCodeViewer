@@ -83,9 +83,11 @@ def _make_scroll_col(parent):
     hsb.grid(row=1, column=0, sticky="ew")
     inner = ttk.Frame(canvas, style="Panel.TFrame")
     win = canvas.create_window((0, 0), window=inner, anchor="nw")
-    inner.bind("<Configure>", lambda e, c=canvas, i=inner, w=win: (
-        c.itemconfigure(w, width=i.winfo_reqwidth()),   # 内容保持自然宽度
-        c.configure(scrollregion=c.bbox("all"))))       # 画布窄于内容时横滚
+    inner.bind("<Configure>", lambda e, c=canvas: c.configure(
+        scrollregion=c.bbox("all")))                   # 画布窄于内容时横滚
+    canvas.bind("<Configure>", lambda e, c=canvas, i=inner, w=win: c.itemconfigure(
+        w, width=i.winfo_reqwidth(),
+        height=max(e.height, i.winfo_reqheight())))    # 内容/画布高者为准
     return box, canvas, inner
 
 
@@ -343,7 +345,11 @@ class NCViewer(tk.Tk):
         self.side_scroll = ttk.Scrollbar(side, orient="vertical",
                                          command=self.side_canvas.yview)
         self.side_scroll.grid(row=0, column=1, sticky="ns")
-        self.side_canvas.config(yscrollcommand=self.side_scroll.set)
+        self.side_hsb = ttk.Scrollbar(side, orient="horizontal",
+                                      command=self.side_canvas.xview)
+        self.side_hsb.grid(row=1, column=0, sticky="ew")
+        self.side_canvas.config(yscrollcommand=self.side_scroll.set,
+                                xscrollcommand=self.side_hsb.set)
         inner = ttk.Frame(self.side_canvas, style="Panel.TFrame")
         self._side_inner = inner
         self._side_window = self.side_canvas.create_window((0, 0), window=inner, anchor="nw")
@@ -351,11 +357,11 @@ class NCViewer(tk.Tk):
         inner.bind("<Configure>", lambda e: self.side_canvas.configure(
             scrollregion=inner.bbox("all")))   # 覆盖实际渲染范围
         def _fit_side_inner(ev):
-            # 窗口项高度 = max(视口, 内容需求): 内容超出时可滚动, 未超出时贴底拉伸
-            need = inner.winfo_reqheight()
-            self.side_canvas.itemconfigure(self._side_window,
-                                           width=ev.width,
-                                           height=max(ev.height, need))
+            # 宽度=内容需求 (挤窄时横滚), 高度 = max(视口, 内容需求)
+            self.side_canvas.itemconfigure(
+                self._side_window,
+                width=inner.winfo_reqwidth(),
+                height=max(ev.height, inner.winfo_reqheight()))
         self.side_canvas.bind("<Configure>", _fit_side_inner)
         # 滚轮: 全局捕获 + 指针位置判断 (子控件上滚动也能带动侧栏)
         self.bind_all("<MouseWheel>", self._on_side_wheel_global)
@@ -380,39 +386,55 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 表格布局 (标签行在上, 值行在下; XYZ / SFG / 行段, 本行全宽)
+        # 当前位置: XYZ 单列各行(11字符), SFG 一行(5字符), 行段平分整行, 本行全宽
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
         posf.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        posf.columnconfigure(1, weight=1)
+
+        def _mk_entry(parent, width):
+            return tk.Entry(parent, width=width, state="readonly",
+                            readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
+                            font=theme.FONT_MONO, justify="left",
+                            relief="solid", bd=1, highlightthickness=1,
+                            highlightbackground=theme.BORDER_LIGHT,
+                            highlightcolor=theme.ACCENT)
+
         self.pos_fields = {}
-        for r, keys in enumerate((("X", "Y", "Z"), ("S", "F", "G"), ("行", "段"))):
-            for c, k in enumerate(keys):
-                col = c * 2
-                posf.columnconfigure(col + 1, weight=1)
-                # 标签行
-                ttk.Label(posf, text=k, style="Panel.TLabel",
-                          font=("", 9, "bold")).grid(row=r * 2, column=col,
-                                                     columnspan=2, sticky="w")
-                # 值行 (9 位数字+小数点+符号)
-                ent = tk.Entry(posf, width=11, state="readonly",
-                               readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
-                               font=theme.FONT_MONO, justify="left",
-                               relief="solid", bd=1, highlightthickness=1,
-                               highlightbackground=theme.BORDER_LIGHT,
-                               highlightcolor=theme.ACCENT)
-                ent.grid(row=r * 2 + 1, column=col, columnspan=2,
-                         sticky="ew", padx=(0, 6), pady=(0, 3))
-                self.pos_fields[k] = ent
-        # 本行: 原始代码行文本 (全宽)
+        for r, k in enumerate(("X", "Y", "Z")):
+            ttk.Label(posf, text=k, style="Panel.TLabel",
+                      font=("", 9, "bold")).grid(row=r, column=0, sticky="w")
+            ent = _mk_entry(posf, 11)
+            ent.grid(row=r, column=1, sticky="ew", padx=(4, 0))
+            self.pos_fields[k] = ent
+        # SFG 一行 (各 5 字符)
+        sfg = ttk.Frame(posf, style="Panel.TFrame")
+        sfg.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        for c, k in enumerate(("S", "F", "G")):
+            sfg.columnconfigure(c * 2 + 1, weight=1)
+            ttk.Label(sfg, text=k, style="Panel.TLabel",
+                      font=("", 9, "bold")).grid(row=0, column=c * 2, sticky="w")
+            ent = _mk_entry(sfg, 5)
+            ent.grid(row=0, column=c * 2 + 1, sticky="ew", padx=(2, 8))
+            self.pos_fields[k] = ent
+        # 行段: 平分一行空间
+        hd = ttk.Frame(posf, style="Panel.TFrame")
+        hd.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        hd.columnconfigure(1, weight=1)
+        hd.columnconfigure(3, weight=1)
+        ttk.Label(hd, text="行", style="Panel.TLabel",
+                  font=("", 9, "bold")).grid(row=0, column=0, sticky="w")
+        self.pos_fields["行"] = _mk_entry(hd, 8)
+        self.pos_fields["行"].grid(row=0, column=1, sticky="ew", padx=(2, 8))
+        ttk.Label(hd, text="段", style="Panel.TLabel",
+                  font=("", 9, "bold")).grid(row=0, column=2, sticky="w")
+        self.pos_fields["段"] = _mk_entry(hd, 8)
+        self.pos_fields["段"].grid(row=0, column=3, sticky="ew", padx=(2, 0))
+        # 本行: 全宽
         ttk.Label(posf, text="本行", style="Panel.TLabel",
-                  font=("", 9, "bold")).grid(row=6, column=0, sticky="w", pady=(2, 0))
-        self.pos_fields["本行"] = tk.Entry(posf, width=30, state="readonly",
-                                          readonlybackground=theme.INPUT_BG,
-                                          fg=theme.TEXT, font=theme.FONT_MONO,
-                                          relief="solid", bd=1, highlightthickness=1,
-                                          highlightbackground=theme.BORDER_LIGHT,
-                                          highlightcolor=theme.ACCENT)
-        self.pos_fields["本行"].grid(row=7, column=0, columnspan=6, sticky="ew",
-                                     padx=(0, 0), pady=(2, 0))
+                  font=("", 9, "bold")).grid(row=5, column=0, sticky="w", pady=(2, 0))
+        self.pos_fields["本行"] = _mk_entry(posf, 30)
+        self.pos_fields["本行"].grid(row=6, column=0, columnspan=2, sticky="ew",
+                                     pady=(2, 0))
 
         # 刀具栏: 固定自然高度之外的剩余空间全部给刀具 (最小 240)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -490,6 +512,7 @@ class NCViewer(tk.Tk):
         rbox, _rcv, rin = _make_scroll_col(right)
         rbox.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
         rin.columnconfigure(0, weight=1)
+        rin.rowconfigure(0, weight=1)        # 段列表随右栏高度拉伸
         loc = ttk.LabelFrame(lin, text="按行定位", padding=8, style="Panel.TLabelframe")
         loc.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         loc.columnconfigure(1, weight=1)
@@ -520,7 +543,7 @@ class NCViewer(tk.Tk):
 
         # 右列: 段控制 (抬刀平面/导航/段列表/段模式)
         segf = ttk.LabelFrame(rin, text="按段浏览", padding=8, style="Panel.TLabelframe")
-        segf.grid(row=0, column=0, sticky="ew")
+        segf.grid(row=0, column=0, sticky="nsew")
         segf.columnconfigure(1, weight=1)
         segf.rowconfigure(6, weight=1)      # 段列表随底部大栏高度伸缩
         ttk.Label(segf, text="抬刀平面 Z:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
