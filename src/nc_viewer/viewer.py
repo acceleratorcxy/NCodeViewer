@@ -729,6 +729,8 @@ class NCViewer(tk.Tk):
         self._refresh_tool_ui()
         self._recompute_segments()
         self.fit_view()
+        # 布局稳定后 (sash/窗口定型) 再自动适配一次, 保证图像大小合适
+        self.after(700, lambda: self.fit_view() if self.result else None)
         self.status.config(text=self._status_text())
         # 高亮文件栏当前项
         self.file_listbox.selection_clear(0, "end")
