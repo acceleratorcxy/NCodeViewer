@@ -152,6 +152,29 @@ def test_enable_dpi_awareness_idempotent():
 
 
 # ---------- 逐行运行 (播放控制条) ----------
+def test_lead_skip_skips_origin_approach(app, tmp_path):
+    """从原点出发的起始进给段被跳过 (程序从第一个可解析点开始)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G0X0Y0\nG01X10Y0F100\nX20Y0\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert app._lead_skip == 2
+    app.update()
+    # 全量渲染不画被跳过的段
+    assert len(app.canvas.find_withtag("path")) == 1
+    # 轨迹模式同样跳过
+    app._trace_begin()
+    app.set_current_line(3, animate=True)
+    assert len(app.canvas.find_withtag("path")) == 1
+
+
+def test_lead_skip_zero_for_non_origin_start(app, tmp_path):
+    """首段不从原点出发时不跳过"""
+    p = tmp_path / "t.nc"
+    p.write_text("X10Y20\nG01X20Y30F100\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert app._lead_skip == 0
+
+
 def test_playback_controls_present(app):
     """播放控制条按钮存在"""
     assert _find(app, "复位"), "缺少复位按钮"
@@ -228,7 +251,7 @@ def test_trace_pan_syncs_stored_coords(app, tmp_path):
     p.write_text(NC_SMALL, encoding="utf-8")
     app.open_file(str(p))
     app._trace_begin()
-    app.set_current_line(1, animate=True)
+    app.set_current_line(2, animate=True)     # 首段(从原点)被跳过, 从第2段取坐标
     flat0 = app._trace_items[0][2]
     x0, y0 = flat0[0], flat0[1]
     app._pan_start(SimpleNamespace(x=0, y=0))
@@ -236,22 +259,25 @@ def test_trace_pan_syncs_stored_coords(app, tmp_path):
     assert app._trace_items[0][2][0] == x0 + 7
     assert app._trace_items[0][2][1] == y0 + 3
     # 平移后继续追加不崩溃
-    app.set_current_line(2, animate=True)
+    app.set_current_line(3, animate=True)
     assert len(app.canvas.find_withtag("path")) >= 1
 
 
 def test_trace_draws_progressively(app, tmp_path):
-    """轨迹渐进: 画布从空白起按行画刀路, 后退整段重绘"""
+    """轨迹渐进: 画布从空白起按行画刀路, 后退整段重绘
+
+    首段(从原点出发)被前导跳过, 轨迹从第 2 段开始画。
+    """
     p = tmp_path / "t.nc"
     p.write_text(NC_SMALL, encoding="utf-8")
     app.open_file(str(p))
     app._trace_begin()
     assert len(app.canvas.find_withtag("path")) == 0
-    app.set_current_line(1, animate=True)     # G1 F1000 -> 1 段
+    app.set_current_line(1, animate=True)     # 第1段(原点出发)被跳过 -> 0 段
+    assert len(app.canvas.find_withtag("path")) == 0
+    app.set_current_line(2, animate=True)     # G2 F2000 -> 1 段
     assert len(app.canvas.find_withtag("path")) == 1
-    app.set_current_line(2, animate=True)     # G2 F2000 新色 -> 2 段
+    app.set_current_line(3, animate=True)     # G0 灰色 -> 2 段
     assert len(app.canvas.find_withtag("path")) == 2
-    app.set_current_line(3, animate=True)     # G0 灰色 -> 3 段
-    assert len(app.canvas.find_withtag("path")) == 3
-    app.set_current_line(1, animate=True)     # 后退 -> 重绘回 1 段
-    assert len(app.canvas.find_withtag("path")) == 1
+    app.set_current_line(1, animate=True)     # 后退 -> 重绘回 0 段
+    assert len(app.canvas.find_withtag("path")) == 0

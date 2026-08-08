@@ -42,6 +42,24 @@ def _sample_dir():
     return os.path.expanduser("~")
 
 
+def _compute_lead_skip(moves):
+    """前导跳过数: 连续从原点(0,0,0)出发的起始进给段数量。
+
+    程序起点应为"第一个可解析点"而非机器原点——从原点出发的
+    对刀/接近段属于噪声, 显示时跳过。若全部段都从原点出发则
+    不跳过 (保留最后一段, 避免画面全空)。
+    """
+    n = 0
+    for m in moves:
+        if n >= len(moves) - 1:
+            break
+        if m.start == (0.0, 0.0, 0.0):
+            n += 1
+        else:
+            break
+    return n
+
+
 def _enable_dpi_awareness():
     """开启进程 DPI 感知, 修复高分屏缩放下 Tk 文字模糊。
 
@@ -106,6 +124,7 @@ class NCViewer(tk.Tk):
         self._trace_drawn = 0            # 已绘制的移动数
         self._trace_items = []           # [(color, item_id, coords_flat)]
         self._move_lines = []            # 每条的 line_number, 供 bisect 定位
+        self._lead_skip = 0              # 前导跳过数 (从原点出发的起始进给段)
 
         self._build_ui()
         self._bind_canvas()
@@ -358,6 +377,8 @@ class NCViewer(tk.Tk):
                 # 渲染前一次性离散所有刀路段(含圆弧), 避免旋转时反复重算
                 "disp3d": [move_points_3d(m, max_seg=4) for m in result.moves],
                 "move_index": {id(m): i for i, m in enumerate(result.moves)},
+                # 程序从第一个可解析点开始: 跳过从原点出发的起始进给段
+                "lead_skip": _compute_lead_skip(result.moves),
             }
             new_paths.append(path)
         if not new_paths:
@@ -390,6 +411,7 @@ class NCViewer(tk.Tk):
         self.move_by_line = item["move_by_line"]
         self._disp3d = item["disp3d"]
         self._move_index = item["move_index"]
+        self._lead_skip = item["lead_skip"]
         self._current_path = path
         self.current_line = None
         # 重置搜索状态(代码内容已重建, 旧命中行号失效)
@@ -655,12 +677,15 @@ class NCViewer(tk.Tk):
 
     # ------------- 渲染 -------------
     def rotated_bbox(self):
-        """当前旋转视角下, 所有刀路点投影后的 2D 包围盒 (a0,b0,a1,b1)"""
+        """当前旋转视角下, 所有刀路点投影后的 2D 包围盒 (a0,b0,a1,b1)。
+
+        排除前导跳过段(从原点出发的起始进给), 使适配聚焦于实际加工区域。
+        """
         q = self.quat
         a0 = b0 = float("inf")
         a1 = b1 = float("-inf")
-        for pts3d in self._disp3d:
-            for p in pts3d:
+        for i in range(self._lead_skip, len(self._disp3d)):
+            for p in self._disp3d[i]:
                 a, b = project(p, q)
                 if a < a0: a0 = a
                 if b < b0: b0 = b
@@ -728,7 +753,9 @@ class NCViewer(tk.Tk):
 
         # 内联四元数投影 + 相邻同色合并为折线(扁平坐标列表)
         polylines = []  # [(color, [sx,sy, sx,sy, ...])]
-        for m, pts3d in zip(self.result.moves, self._disp3d):
+        for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
+            if i < self._lead_skip:      # 从原点出发的起始进给段不显示
+                continue
             if m.motion == "G0" and not show_g0:
                 continue
             key = color_of_move(m, palette)
@@ -779,10 +806,13 @@ class NCViewer(tk.Tk):
         a, b = project(pos, q)
         cx, cy = self.world_to_canvas(a, b)
 
-        # 当前段高亮 + 加工方向箭头
+        # 当前段高亮 + 加工方向箭头 (前导跳过段不显示高亮)
         m = self.move_by_line.get(self.current_line)
         if m is not None and not (m.motion == "G0" and not self.show_g0.get()):
             idx = self._move_index[id(m)]
+            if idx < self._lead_skip:
+                m = None
+        if m is not None:
             pts = [self.world_to_canvas(*project(p, q)) for p in self._disp3d[idx]]
             if len(pts) >= 2:
                 self.canvas.create_line(pts, fill=SEG_COLOR, width=3,
@@ -1160,10 +1190,10 @@ class NCViewer(tk.Tk):
 
     # ------------- 轨迹渐进绘制 (播放/演示时刀路逐行画出) -------------
     def _trace_begin(self):
-        """开始轨迹演示: 清空已绘刀路, 从零开始按行绘制"""
+        """开始轨迹演示: 清空已绘刀路, 从第一个可解析点起按行绘制"""
         self.canvas.delete("path")
         self._trace_active = True
-        self._trace_drawn = 0
+        self._trace_drawn = self._lead_skip    # 跳过从原点出发的起始进给段
         self._trace_items = []
         self._move_lines = [m.line_number for m in self.result.moves]
         self._draw_axes()
@@ -1179,7 +1209,7 @@ class NCViewer(tk.Tk):
         self.canvas.delete("axes", "path", "cur", "curseg")
         self._draw_axes()
         self._trace_items = []
-        self._trace_drawn = 0
+        self._trace_drawn = self._lead_skip
         self._trace_draw_to(drawn - 1)
         if self.current_line is not None:
             self._draw_current()
@@ -1190,7 +1220,7 @@ class NCViewer(tk.Tk):
             for _, item, _ in self._trace_items:
                 self.canvas.delete(item)
             self._trace_items = []
-            self._trace_drawn = 0
+            self._trace_drawn = self._lead_skip
         moves = self.result.moves
         show_g0 = self.show_g0.get()
         w, x, y, z = self.quat
