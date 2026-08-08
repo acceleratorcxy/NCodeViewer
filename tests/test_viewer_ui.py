@@ -152,6 +152,41 @@ def test_enable_dpi_awareness_idempotent():
 
 
 # ---------- 逐行运行 (播放控制条) ----------
+def test_play_batch_advances_multiple_lines(app, tmp_path):
+    """合并跳行: 播放一次推进合并行数"""
+    p = tmp_path / "t.nc"
+    p.write_text("\n".join(f"G01X{i}F100" for i in range(1, 11)), encoding="utf-8")
+    app.open_file(str(p))
+    app.batch_cb.set("5")
+    app._play_mode = "play"
+    app.current_line = 0
+    app._play_tick()
+    assert app.current_line == 5
+    app._play_tick()
+    assert app.current_line == 10
+    app._stop_playback()
+
+
+def test_play_batch_invalid_clamped(app, tmp_path):
+    """合并行数非法输入回退 1, 超界钳制到 100"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10F100\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.batch_cb.set("abc")
+    assert app._batch_lines() == 1
+    app.batch_cb.set("500")
+    assert app._batch_lines() == 100
+
+
+def test_direction_arrow_prominent(app):
+    """方向箭头增强: 绘制的箭头更大更醒目 (长段上不受尺寸保护压制)"""
+    app._arrow_at(100, 100, 100, 0)
+    polys = [i for i in app.canvas.find_all() if app.canvas.type(i) == "polygon"]
+    assert polys, "未绘制箭头"
+    x0, y0, x1, y1 = app.canvas.bbox(polys[-1])
+    assert (x1 - x0) >= 10 and (y1 - y0) >= 10
+
+
 def test_lead_skip_skips_origin_approach(app, tmp_path):
     """从原点出发的起始进给段被跳过 (程序从第一个可解析点开始)"""
     p = tmp_path / "t.nc"

@@ -201,6 +201,13 @@ class NCViewer(tk.Tk):
         self.speed_cb = ttk.Combobox(ctl, values=("慢", "中", "快"), width=4, state="readonly")
         self.speed_cb.set("中")
         self.speed_cb.pack(side="left", padx=(2, 0))
+        ttk.Label(ctl, text="合并:", style="Panel.TLabel").pack(side="left", padx=(8, 0))
+        # 合并跳行: 播放一次推进 N 行 (1-10 + 整十快捷项, 可手输任意 1-100)
+        self.batch_cb = ttk.Combobox(ctl, width=4, state="normal",
+                                     values=("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                                             "20", "30", "40", "50", "60", "70", "80", "90", "100"))
+        self.batch_cb.set("1")
+        self.batch_cb.pack(side="left", padx=(2, 0))
         ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(ctl, text="直达行",
                    command=lambda: self._run_to_target(False)).pack(side="left")
@@ -857,20 +864,20 @@ class NCViewer(tk.Tk):
                 nx, ny = pts[-1]
             self._arrow_at(x, y, nx - x, ny - y)
 
-    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=9):
-        """在 (x,y) 处画一个指向 (dx,dy) 方向的实心三角箭头"""
+    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=14):
+        """在 (x,y) 处画一个指向 (dx,dy) 方向的实心三角箭头 (带深色描边, 醒目)"""
         L = math.hypot(dx, dy)
         if L < 1e-6:
             return
         ux, uy = dx / L, dy / L
         px, py = -uy, ux                     # 垂直方向(箭头翼)
         size = min(size, L * 0.5)            # 避免过短段上箭头过大
-        b1x = x - ux * size + px * size * 0.5
-        b1y = y - uy * size + py * size * 0.5
-        b2x = x - ux * size - px * size * 0.5
-        b2y = y - uy * size - py * size * 0.5
+        b1x = x - ux * size + px * size * 0.55
+        b1y = y - uy * size + py * size * 0.55
+        b2x = x - ux * size - px * size * 0.55
+        b2y = y - uy * size - py * size * 0.55
         self.canvas.create_polygon(x, y, b1x, b1y, b2x, b2y,
-                                   fill=color, outline="", tags="cur")
+                                   fill=color, outline="#000000", width=1, tags="cur")
 
     # ------------- 交互: 平移/缩放 -------------
     def _pan_start(self, e):
@@ -1098,6 +1105,14 @@ class NCViewer(tk.Tk):
     def _play_speed_ms(self):
         return {"慢": 80, "中": 40, "快": 10}[self.speed_cb.get()]
 
+    def _batch_lines(self):
+        """播放合并行数: 1-100; 非法输入回退 1"""
+        try:
+            n = int(self.batch_cb.get())
+        except (ValueError, tk.TclError):
+            return 1
+        return max(1, min(100, n))
+
     def _play_toggle(self):
         """▶ 播放 / 暂停 切换 (连续播放, 画布从空白起逐行画刀路)"""
         if not self.result:
@@ -1116,10 +1131,11 @@ class NCViewer(tk.Tk):
         if self._play_mode != "play":
             return
         base = self.current_line if self.current_line else 0
-        ln = base + 1
-        if ln > len(self.lines):
+        if base >= len(self.lines):
             self._stop_playback()
             return
+        # 合并跳行: 一次推进 N 行 (轨迹同步合并绘制)
+        ln = min(base + self._batch_lines(), len(self.lines))
         self.set_current_line(ln, animate=True)
         self._play_job = self.after(self._play_speed_ms(), self._play_tick)
 
