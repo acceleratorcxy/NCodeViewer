@@ -241,9 +241,11 @@ def test_tool_checkbox_in_toolbar(app):
 
 
 def test_position_above_tool_pinned(app):
-    """当前位置栏与刀具栏均固定, 刀具栏顶部紧贴当前位置下边 (同在 side 容器)"""
-    assert app.pos_fields["X"].master.master is app.tool_cv.master.master
-    assert app.pos_fields["X"].master.master is not app._side_inner
+    """程序统计/当前位置/刀具栏均固定在 side 容器 (滚动区只剩图例)"""
+    side = app.pos_fields["X"].master.master
+    assert side is app.tool_cv.master.master          # 位置与刀具同容器
+    assert side is app.stats_labels["x"].master.master   # 统计同容器
+    assert side is not app._side_inner
 
 
 def test_position_fields_boxed_values(app, tmp_path):
