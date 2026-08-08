@@ -198,7 +198,7 @@ def test_tool_parsed_from_sibling_aptsource(app, tmp_path):
         "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
         "         0.000000, 30.000000\n", encoding="utf-8")
     app.open_file(str(p))
-    assert app.tool is not None and app.tool.kind == "flat"
+    assert app.tool is not None and app.tool.kind == "ball"    # D20R3 圆鼻立铣刀
     assert "D20" in app.stats_labels["tool"]["text"]
 
 

@@ -27,8 +27,8 @@ from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
 from .parser import compute_stats, parse_nc
-from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_overall_height,
-                   tool_profile_points, tool_summary)
+from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_full_profile,
+                   tool_overall_height, tool_profile_points, tool_summary)
 
 
 def _sample_dir():
@@ -747,14 +747,10 @@ class NCViewer(tk.Tk):
     def _tool_model_points(self, tool):
         """刀具旋转体 3D 模型点集 [(kind, [(x,y,z),...])], 本地坐标:
         刀尖在原点, 刀具轴沿 +Z 向上; body 为半透明实体外轮廓"""
-        profile = tool_profile_points(tool)
+        full = tool_full_profile(tool)       # 切削部分 + 刀柄 (反锥含缩颈)
         l = float(tool.p("l", 30.0))
         h = tool_overall_height(tool)
-        r_top = profile[-1][0]
-        full = list(profile)
-        if h > l + 1e-9:
-            full.append((r_top, l))
-            full.append((r_top, h))          # 刀柄延伸至总长
+        r_top = full[-1][0]
         max_r = max(r for r, _ in full)
         pts = []
         # 实体: 右缘(下->上) + 顶部圆 + 左缘(上->下), 闭合于刀尖
@@ -845,13 +841,9 @@ class NCViewer(tk.Tk):
         profile = tool_profile_points(tool)
         if not profile:
             return
-        l = max(y for _, y in profile)          # 刃长
+        full = tool_full_profile(tool)          # 切削部分 + 刀柄 (反锥含缩颈)
+        l = float(tool.p("l", 30.0))            # 刃长
         h = tool_overall_height(tool)           # 总长 (含刀柄)
-        r_top = profile[-1][0]
-        full = list(profile)
-        if h > l + 1e-9:
-            full.append((r_top, l))
-            full.append((r_top, h))             # 刀柄延伸
         max_r = max(r for r, _ in full)
         # 画布缩放: 宽度含左右镜像, 高度为总长, 留标注边距
         pad = 64

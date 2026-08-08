@@ -12,10 +12,10 @@ CUTTER_20_3 = (
 )
 
 
-def test_parse_flat_with_corner_radius():
-    """D20R3 (r<d/2) -> 平底立铣刀带圆角"""
+def test_parse_round_nose_with_corner_radius():
+    """D20R3 -> 圆鼻立铣刀带圆角 (命名参考刀具说明.txt)"""
     t = parse_aptsource_tool(CUTTER_20_3)
-    assert t is not None and t.kind == "flat"
+    assert t is not None and t.kind == "ball"
     assert t.p("d") == 20.0 and t.p("r") == 3.0
 
 
@@ -36,11 +36,12 @@ def test_parse_drill_point_angle():
 
 
 def test_parse_inverse_taper():
-    """a<0 -> 反锥立铣刀, 锥角 |a|"""
+    """a<0 -> 反锥立铣刀, 锥角 |a|, 带圆角 r"""
     t = parse_aptsource_tool("CUTTER/ 12.000000,  3.000000,  3.000000,  3.000000,  0.000000,$\n"
                              "        -2.000000, 25.000000\n")
     assert t.kind == "invtaper"
     assert t.p("taper") == pytest.approx(2.0)
+    assert t.p("r") == pytest.approx(3.0)
 
 
 def test_parse_no_cutter_returns_none():
@@ -117,7 +118,8 @@ def test_parse_taper_toolno_with_angle_field():
     )
     t = parse_aptsource_tool(text)
     assert t is not None and t.kind == "invtaper"
-    assert t.p("l") == pytest.approx(3.0)     # TOOLNO 第5位为0 -> 回退 CUTTER e
+    # 锥段长由 (D - 锥顶D)/2/tanθ 反推: (12-10.467)/2/tan(2°)
+    assert t.p("l") == pytest.approx((12.0 - 10.467) / 2 / math.tan(math.radians(2.0)))
     assert t.p("h") == pytest.approx(25.0)    # CUTTER 第7参数
 
 
