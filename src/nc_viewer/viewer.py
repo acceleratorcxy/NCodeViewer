@@ -112,6 +112,8 @@ class NCViewer(tk.Tk):
         self.state("zoomed")
         # 布局可缩放下限: 再小则画布/侧栏失去可用性
         self.minsize(960, 560)
+        # 窗口映射后抬高底部大栏 (sash 一次性定位, 用户可再拖)
+        self.after(200, self._raise_bottom_bar)
 
         self.result = None
         self.lines = []
@@ -194,9 +196,11 @@ class NCViewer(tk.Tk):
         # 主体: 上=画布+侧栏, 下=代码列表
         body = ttk.PanedWindow(self, orient="vertical")
         body.pack(side="top", fill="both", expand=True, padx=6, pady=4)
+        self.body_pane = body
 
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
+        # 底部大栏默认抬高: 权重 1 -> 2 (约占 1/3 高度)
 
         # 左侧文件栏: 一次加载多个文件, 随时切换 (面板样式, 与画布区分)
         fs_frame = ttk.Frame(upper, width=280, padding=6, style="Panel.TFrame")
@@ -376,7 +380,7 @@ class NCViewer(tk.Tk):
 
         # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
         code_split = ttk.Panedwindow(body, orient="horizontal")
-        body.add(code_split, weight=1)
+        body.add(code_split, weight=2)
         code_frame = ttk.Frame(code_split)
         code_split.add(code_frame, weight=3)
         ttk.Label(code_frame, text="NC 代码 (点击行选中目标行)", padding=(4, 2)).pack(side="top", fill="x")
@@ -507,6 +511,15 @@ class NCViewer(tk.Tk):
                          lambda e: self._view_refresh() if self.result else None)
         self._pan_data = None
         self._rot_data = None
+
+    def _raise_bottom_bar(self):
+        """默认抬高底部大栏 (NC 代码+定位/搜索+段控制), 底部约占 35%"""
+        try:
+            h = self.body_pane.winfo_height()
+            if h > 300:
+                self.body_pane.sashpos(0, int(h * 0.65))
+        except tk.TclError:
+            pass
 
     def _on_side_wheel(self, e):
         """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
