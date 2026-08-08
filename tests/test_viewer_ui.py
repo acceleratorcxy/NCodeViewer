@@ -240,6 +240,12 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
+def test_position_above_tool_pinned(app):
+    """当前位置栏与刀具栏均固定, 刀具栏顶部紧贴当前位置下边 (同在 side 容器)"""
+    assert app.pos_fields["X"].master.master is app.tool_cv.master.master
+    assert app.pos_fields["X"].master.master is not app._side_inner
+
+
 def test_position_fields_boxed_values(app, tmp_path):
     """当前位置: 只读框展示 X/Y/Z/S/F/G/行/本行"""
     p = tmp_path / "t.nc"

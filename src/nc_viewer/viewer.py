@@ -91,6 +91,8 @@ class NCViewer(tk.Tk):
         self.configure(bg=theme.BG)
         self.title("NC 刀路查看器")
         self.geometry("1280x820")
+        # 默认最大化打开 (Win7 支持 state zoomed)
+        self.state("zoomed")
         # 布局可缩放下限: 再小则画布/侧栏失去可用性
         self.minsize(960, 560)
 
@@ -279,11 +281,9 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
-
-        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行)
-        posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行), 固定在刀具栏上方
+        posf = ttk.LabelFrame(side, text="当前位置", padding=8, style="Panel.TLabelframe")
+        posf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
         for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行")):
@@ -308,9 +308,9 @@ class NCViewer(tk.Tk):
                                           highlightcolor=theme.ACCENT)
         self.pos_fields["本行"].grid(row=7, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
-        # 刀具栏: 固定在侧栏底部 (滚动区之外, 紧挨底部行按行定位面板上沿)
+        # 刀具栏: 固定在侧栏底部 (顶部紧贴当前位置栏下边)
         tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=1, column=0, columnspan=2, sticky="sew", pady=(8, 0))
+        tbar.grid(row=2, column=0, columnspan=2, sticky="sew")
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
