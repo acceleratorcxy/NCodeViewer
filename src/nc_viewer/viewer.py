@@ -164,6 +164,10 @@ class NCViewer(tk.Tk):
         self._seg_filter = None            # (start_idx, end_idx) | None
         self._seg_only = tk.BooleanVar(value=False)
 
+        # 投影缓存: 四元数/过滤条件不变时缩放只做坐标变换 (提速缩放)
+        self._proj_cache = None
+        self._bbox_cache = None          # (key, bbox) 适配用
+
         self._build_ui()
         self._bind_canvas()
 
@@ -750,15 +754,21 @@ class NCViewer(tk.Tk):
         for f, col in self.palette.items():
             self.code.tag_configure(self._f_tag(f), foreground=col)
         move_by_line = self.move_by_line
+        # 单次批量插入 (文本+标签成对), 大程序填充提速 (实测最优)
+        parts = []
         for i, line in enumerate(self.lines, 1):
-            self.code.insert("end", f"{i:5d}| ", "ln")
             m = move_by_line.get(i)
             if m is None:
-                self.code.insert("end", line + "\n")
+                tag = ""
             elif m.motion == "G0":
-                self.code.insert("end", line + "\n", "g0")
+                tag = "g0"
             else:
-                self.code.insert("end", line + "\n", self._f_tag(m.feed))
+                tag = self._f_tag(m.feed)
+            parts.append(f"{i:5d}| ")
+            parts.append("ln")
+            parts.append(line + "\n")
+            parts.append(tag)
+        self.code.insert("end", *parts)
         self.code.configure(state="disabled")
 
     @staticmethod
@@ -1268,9 +1278,13 @@ class NCViewer(tk.Tk):
     def rotated_bbox(self):
         """当前旋转视角下, 所有刀路点投影后的 2D 包围盒 (a0,b0,a1,b1)。
 
-        排除前导跳过段(从原点出发的起始进给), 使适配聚焦于实际加工区域。
+        排除前导跳过段(从原点出发的起始进给), 使适配聚焦于实际加工区域;
+        四元数/过滤未变时复用缓存, 避免重复全量投影。
         """
         q = self.quat
+        key = (id(self.result), q, self._seg_filter, self._lead_skip)
+        if self._bbox_cache is not None and self._bbox_cache[0] == key:
+            return self._bbox_cache[1]
         a0 = b0 = float("inf")
         a1 = b1 = float("-inf")
         for i in range(self._lead_skip, len(self._disp3d)):
@@ -1283,8 +1297,11 @@ class NCViewer(tk.Tk):
                 if a > a1: a1 = a
                 if b > b1: b1 = b
         if a0 == float("inf"):
-            return (0.0, 0.0, 1.0, 1.0)
-        return a0, b0, a1, b1
+            bbox = (0.0, 0.0, 1.0, 1.0)
+        else:
+            bbox = (a0, b0, a1, b1)
+        self._bbox_cache = (key, bbox)
+        return bbox
 
     def _view_refresh(self):
         """视图变换后的刷新: 轨迹模式重投影已画轨迹, 否则全量渲染"""
@@ -1330,7 +1347,16 @@ class NCViewer(tk.Tk):
         oy = my + wy * new_scale
         self.scale = new_scale
         self.offset = (ox, oy)
-        self._view_refresh()
+        if self.result:
+            # 原位缩放全部图元 (C 级操作), 免重投影/重建
+            self.canvas.scale("all", mx, my, factor, factor)
+            # 同步轨迹存储坐标 (平移/缩放后追加保持一致)
+            if self._trace_active:
+                for _, _, flat in self._trace_items:
+                    for i in range(0, len(flat), 2):
+                        flat[i] = mx + (flat[i] - mx) * factor
+                        flat[i + 1] = my + (flat[i + 1] - my) * factor
+            self._place_legend()
 
     def render(self):
         self._trace_active = False        # 全量渲染即退出轨迹演示
@@ -1341,30 +1367,53 @@ class NCViewer(tk.Tk):
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
         show_g0 = self.show_g0.get()
         palette = self.palette
+        # 预计算四元数系数 (省去每点 2 倍乘)
+        a2, b2, c2 = 2.0 * y, 2.0 * z, 2.0 * x
 
-        # 内联四元数投影 + 相邻同色合并为折线(扁平坐标列表)
-        polylines = []  # [(color, [sx,sy, sx,sy, ...])]
-        for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
-            if i < self._lead_skip:      # 从原点出发的起始进给段不显示
-                continue
-            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
-                continue                 # 段模式: 只显示当前段
-            if m.motion == "G0" and not show_g0:
-                continue
-            key = color_of_move(m, palette)
-            coords = []
-            for px, py, pz in pts3d:
-                tx = 2 * (y * pz - z * py)
-                ty = 2 * (z * px - x * pz)
-                tz = 2 * (x * py - y * px)
-                vx = px + w * tx + (y * tz - z * ty)
-                vy = py + w * ty + (z * tx - x * tz)
-                coords.append(vx * scale + ox)
-                coords.append(-vy * scale + oy)
-            if polylines and polylines[-1][0] == key:
-                polylines[-1][1].extend(coords[2:])
-            else:
-                polylines.append([key, coords])
+        key = (id(self.result), w, x, y, z, self._seg_filter, show_g0,
+               self._lead_skip)
+        if self._proj_cache is not None and self._proj_cache[0] == key:
+            # 四元数/过滤未变: 复用缓存投影, 仅重算缩放偏移 (缩放提速)
+            polylines = []
+            for color, base in self._proj_cache[1]:
+                coords = [0.0] * (len(base))
+                for i in range(0, len(base), 2):
+                    coords[i] = base[i] * scale + ox
+                    coords[i + 1] = -base[i + 1] * scale + oy
+                polylines.append([color, coords])
+        else:
+            # 内联四元数投影 + 相邻同色合并为折线(扁平坐标列表)
+            polylines = []
+            base_store = []      # 缓存: 不含缩放偏移的世界投影坐标
+            for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
+                if i < self._lead_skip:      # 从原点出发的起始进给段不显示
+                    continue
+                if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+                    continue                 # 段模式: 只显示当前段
+                if m.motion == "G0" and not show_g0:
+                    continue
+                color = color_of_move(m, palette)
+                coords = []
+                base = []
+                ap = coords.append
+                bp = base.append
+                for px, py, pz in pts3d:
+                    tx = a2 * pz - b2 * py
+                    ty = b2 * px - c2 * pz
+                    tz = c2 * py - a2 * px
+                    vx = px + w * tx + y * tz - z * ty
+                    vy = py + w * ty + z * tx - x * tz
+                    ap(vx * scale + ox)
+                    ap(-vy * scale + oy)
+                    bp(vx)
+                    bp(vy)
+                if polylines and polylines[-1][0] == color:
+                    polylines[-1][1].extend(coords[2:])
+                    base_store[-1][1].extend(base[2:])
+                else:
+                    polylines.append([color, coords])
+                    base_store.append([color, base])
+            self._proj_cache = (key, base_store)
 
         for color, pts in polylines:
             if len(pts) < 4:
@@ -1379,8 +1428,9 @@ class NCViewer(tk.Tk):
         self.status.config(text=self._status_text())
 
     def _place_legend(self):
-        """在画布右上角重建漂浮图例窗口项"""
+        """在画布右上角重建漂浮图例窗口项 (先清旧项防重复)"""
         try:
+            self.canvas.delete("legend")
             w = self.canvas.winfo_width()
             self.canvas.create_window((w - 10, 10), window=self.legend,
                                       anchor="ne", tags="legend")
@@ -1780,7 +1830,7 @@ class NCViewer(tk.Tk):
         self._lift_auto = True
         self._recompute_segments()
 
-    def _apply_seg_filter(self):
+    def _apply_seg_filter(self, refresh=True):
         """根据「仅显示当前段」设置渲染过滤"""
         if (self._seg_only.get() and self._seg_index is not None
                 and self._segments):
@@ -1788,21 +1838,22 @@ class NCViewer(tk.Tk):
             self._seg_filter = (seg.start_idx, seg.end_idx)
         else:
             self._seg_filter = None
-        if self.result:
+        if self.result and refresh:
             self._view_refresh()
 
     def _toggle_seg_only(self):
         self._stop_playback()
-        self._apply_seg_filter()
-        if self._seg_filter and self._seg_index is not None:
-            self._set_segment(self._seg_index)
+        if self._seg_index is not None:
+            self._set_segment(self._seg_index)   # 单次渲染 (含过滤+导航)
+        else:
+            self._apply_seg_filter()
 
     def _set_segment(self, idx):
         """跳转到指定段: 段模式直接展示该段完整刀路 (从头播放先复位)"""
         if not (0 <= idx < len(self._segments)):
             return
         self._seg_index = idx
-        self._apply_seg_filter()
+        self._apply_seg_filter(refresh=False)   # 由下方导航单次渲染
         seg = self._segments[idx]
         self._stop_playback()
         if self._seg_filter:
