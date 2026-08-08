@@ -326,9 +326,10 @@ class NCViewer(tk.Tk):
         self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
         inner.bind("<MouseWheel>", self._on_side_wheel)
 
-        # 程序统计 (单列, 值全宽显示)
+        # 程序统计 (单列, 值全宽显示; 三栏均分拉伸, 各有最低高度)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        st.grid(row=0, column=0, sticky="nsew", pady=(0, 2))
+        inner.rowconfigure(0, weight=1, minsize=240)
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -346,41 +347,39 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示 (双列紧凑布局, 兼容 1366x768/1920x1080)
+        # 当前位置: 只读框字段展示 (纵向单列)
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        posf.grid(row=1, column=0, sticky="nsew", pady=(0, 2))
+        inner.rowconfigure(1, weight=1, minsize=300)
         posf.columnconfigure(1, weight=1)
-        posf.columnconfigure(3, weight=1)
         self.pos_fields = {}
-        for r, (k1, k2) in enumerate((("X", "Y"), ("Z", "S"), ("F", "G"), ("行", "段"))):
-            for c, k in ((0, k1), (2, k2)):
-                ttk.Label(posf, text=k, style="Panel.TLabel",
-                          font=("", 9, "bold")).grid(row=r, column=c, sticky="w")
-                ent = tk.Entry(posf, width=8, state="readonly",
-                               readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
-                               font=theme.FONT_MONO, justify="left",
-                               relief="solid", bd=1, highlightthickness=1,
-                               highlightbackground=theme.BORDER_LIGHT,
-                               highlightcolor=theme.ACCENT)
-                ent.grid(row=r, column=c + 1, sticky="ew", padx=(3, 8), pady=1)
-                self.pos_fields[k] = ent
-        # 本行: 原始代码行文本 (横跨双列)
+        for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
+            ttk.Label(posf, text=key, style="Panel.TLabel",
+                      font=("", 9, "bold")).grid(row=r, column=0, sticky="w")
+            ent = tk.Entry(posf, width=10, state="readonly",
+                           readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
+                           font=theme.FONT_MONO, justify="left",
+                           relief="solid", bd=1, highlightthickness=1,
+                           highlightbackground=theme.BORDER_LIGHT,
+                           highlightcolor=theme.ACCENT)
+            ent.grid(row=r, column=1, sticky="ew", padx=(4, 0), pady=1)
+            self.pos_fields[key] = ent
+        # 本行: 原始代码行文本
         ttk.Label(posf, text="本行", style="Panel.TLabel",
-                  font=("", 9, "bold")).grid(row=4, column=0, sticky="w", pady=(2, 0))
-        self.pos_fields["本行"] = tk.Entry(posf, width=24, state="readonly",
+                  font=("", 9, "bold")).grid(row=8, column=0, sticky="w", pady=(2, 0))
+        self.pos_fields["本行"] = tk.Entry(posf, width=28, state="readonly",
                                           readonlybackground=theme.INPUT_BG,
                                           fg=theme.TEXT, font=theme.FONT_MONO,
                                           relief="solid", bd=1, highlightthickness=1,
                                           highlightbackground=theme.BORDER_LIGHT,
                                           highlightcolor=theme.ACCENT)
-        self.pos_fields["本行"].grid(row=4, column=1, columnspan=3, sticky="ew",
-                                     padx=(3, 0), pady=(2, 0))
+        self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(4, 0),
+                                     pady=(2, 0))
 
-        # 刀具栏: 自然高度贴底 (额外空间由占位行吸收, 大屏不会拉得过高)
-        ttk.Frame(inner, style="Panel.TFrame").grid(row=2, column=0, sticky="nsew")
-        inner.rowconfigure(2, weight=1)
+        # 刀具栏: 与统计/位置均分拉伸, 有最低高度
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=3, column=0, sticky="sew")
+        tbar.grid(row=2, column=0, sticky="nsew")
+        inner.rowconfigure(2, weight=1, minsize=240)
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
@@ -391,8 +390,8 @@ class NCViewer(tk.Tk):
         self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
-        # 剖面图直接内嵌在刀具信息下方 (固定高度, 大屏不拉伸过高)
-        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=240, highlightthickness=0)
+        # 剖面图直接内嵌在刀具信息下方 (随刀具栏均分高度伸缩)
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=140, highlightthickness=0)
         self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
