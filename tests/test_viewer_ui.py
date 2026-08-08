@@ -289,12 +289,29 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
-def test_sidebar_bottom_three_pinned(app):
-    """程序统计/当前位置/刀具三区在侧栏内完整堆叠 (无滚动容器)"""
-    side = app.stats_labels["x"].master.master
-    assert side is app.pos_fields["X"].master.master
-    assert side is app.tool_cv.master.master
-    assert not hasattr(app, "side_canvas")     # 滚动容器已移除
+def test_sidebar_sections_in_scroll(app):
+    """统计/位置/刀具三区在同一滚动容器, 小屏可滚动"""
+    inner = app._side_inner
+    assert app.stats_labels["x"].master.master is inner
+    assert app.pos_fields["X"].master.master is inner
+    assert app.tool_cv.master.master is inner
+    assert app.side_canvas.winfo_exists()
+
+
+def test_small_screen_sidebar_scrolls(app, tmp_path):
+    """1366x768 屏: 侧栏内容超出时滚动可达"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")                       # 取消最大化再设窗口尺寸
+    app.geometry("1366x728")
+    app.update()
+    vh = app.side_canvas.winfo_height()
+    sr = app.side_canvas.cget("scrollregion")     # "x0 y0 x1 y1"
+    h_sr = float(sr.split()[-1])
+    assert h_sr > vh, "小屏下侧栏应可滚动"
+    app.side_canvas.yview_moveto(1.0)             # 滚到底部可达
+    assert app.side_canvas.yview()[0] > 0.0
 
 
 def test_segment_fields_and_navigation(app, tmp_path):
