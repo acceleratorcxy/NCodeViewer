@@ -66,20 +66,18 @@ def _compute_lead_skip(moves):
 
 
 def _make_scroll_col(parent):
-    """双轴滚动列容器: 返回 (box, canvas, inner)。
+    """竖向滚动列容器: 返回 (box, canvas, inner)。
 
-    内容超出时竖向/横向滚动条生效; 宽度不足时内容按需求宽度撑开 (横向滚动)。
+    宽度随内容 (无需横向滚动); 内容高度超出时竖向滚动条生效。
     """
     box = ttk.Frame(parent, style="Panel.TFrame")
     box.columnconfigure(0, weight=1)
     box.rowconfigure(0, weight=1)
-    canvas = tk.Canvas(box, bg=theme.PANEL, highlightthickness=0, width=200)
+    canvas = tk.Canvas(box, bg=theme.PANEL, highlightthickness=0)
     vsb = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
-    hsb = ttk.Scrollbar(box, orient="horizontal", command=canvas.xview)
-    canvas.config(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
+    canvas.config(yscrollcommand=vsb.set)
     canvas.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
-    hsb.grid(row=1, column=0, sticky="ew")
     inner = ttk.Frame(canvas, style="Panel.TFrame")
     win = canvas.create_window((0, 0), window=inner, anchor="nw")
     inner.bind("<Configure>", lambda e, c=canvas: c.configure(
@@ -381,33 +379,35 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示 (纵向单列, 固定自然高度)
+        # 当前位置: 表格布局 (XYZ / SFG / 行段 各一行, 本行全宽)
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
         posf.grid(row=1, column=0, sticky="ew", pady=(0, 2))
-        posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
-        for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
-            ttk.Label(posf, text=key, style="Panel.TLabel",
-                      font=("", 9, "bold")).grid(row=r, column=0, sticky="w")
-            ent = tk.Entry(posf, width=10, state="readonly",
-                           readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
-                           font=theme.FONT_MONO, justify="left",
-                           relief="solid", bd=1, highlightthickness=1,
-                           highlightbackground=theme.BORDER_LIGHT,
-                           highlightcolor=theme.ACCENT)
-            ent.grid(row=r, column=1, sticky="ew", padx=(4, 0), pady=1)
-            self.pos_fields[key] = ent
-        # 本行: 原始代码行文本
+        for r, keys in enumerate((("X", "Y", "Z"), ("S", "F", "G"), ("行", "段"))):
+            for c, k in enumerate(keys):
+                col = c * 2
+                posf.columnconfigure(col + 1, weight=1)
+                ttk.Label(posf, text=k, style="Panel.TLabel",
+                          font=("", 9, "bold")).grid(row=r, column=col, sticky="w")
+                ent = tk.Entry(posf, width=8, state="readonly",
+                               readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
+                               font=theme.FONT_MONO, justify="left",
+                               relief="solid", bd=1, highlightthickness=1,
+                               highlightbackground=theme.BORDER_LIGHT,
+                               highlightcolor=theme.ACCENT)
+                ent.grid(row=r, column=col + 1, sticky="ew", padx=(2, 6), pady=1)
+                self.pos_fields[k] = ent
+        # 本行: 原始代码行文本 (全宽)
         ttk.Label(posf, text="本行", style="Panel.TLabel",
-                  font=("", 9, "bold")).grid(row=8, column=0, sticky="w", pady=(2, 0))
-        self.pos_fields["本行"] = tk.Entry(posf, width=28, state="readonly",
+                  font=("", 9, "bold")).grid(row=3, column=0, sticky="w", pady=(2, 0))
+        self.pos_fields["本行"] = tk.Entry(posf, width=30, state="readonly",
                                           readonlybackground=theme.INPUT_BG,
                                           fg=theme.TEXT, font=theme.FONT_MONO,
                                           relief="solid", bd=1, highlightthickness=1,
                                           highlightbackground=theme.BORDER_LIGHT,
                                           highlightcolor=theme.ACCENT)
-        self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(4, 0),
-                                     pady=(2, 0))
+        self.pos_fields["本行"].grid(row=3, column=1, columnspan=5, sticky="ew",
+                                     padx=(2, 0), pady=(2, 0))
 
         # 刀具栏: 固定自然高度之外的剩余空间全部给刀具 (最小 240)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")

@@ -61,7 +61,7 @@ def apply_theme(root):
     # 按钮: clam 支持 active 状态, 悬停自动高亮
     style.configure(BTN, background=PANEL, foreground=TEXT, bordercolor=BORDER,
                     lightcolor=PANEL, darkcolor=PANEL, focuscolor=ACCENT,
-                    font=FONT_UI, padding=(10, 4))
+                    font=FONT_UI, padding=(6, 2))
     style.map(BTN,
               background=[("pressed", ACCENT), ("active", ACCENT_HOVER)],
               foreground=[("pressed", "#ffffff"), ("active", "#ffffff")],
@@ -69,7 +69,7 @@ def apply_theme(root):
     # 主操作按钮: 强调色底
     style.configure(BTN_ACCENT, background=ACCENT, foreground="#ffffff",
                     bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT,
-                    focuscolor=ACCENT_HOVER, font=FONT_UI, padding=(12, 4))
+                    focuscolor=ACCENT_HOVER, font=FONT_UI, padding=(8, 2))
     style.map(BTN_ACCENT,
               background=[("pressed", ACCENT_HOVER), ("active", ACCENT_HOVER)],
               bordercolor=[("pressed", ACCENT_HOVER), ("active", ACCENT_HOVER)])
