@@ -200,6 +200,8 @@ class NCViewer(tk.Tk):
         # 启动稳定期(3 秒)内 body 尺寸事件会重置 sash, 期间持续重设默认位置
         self._sash_until = time.time() + 3.0
         body.bind("<Configure>", lambda e: self._maybe_apply_default_sash())
+        # 底部大栏最小 35%: 拖动 sash 时钳制
+        body.bind("<B1-Motion>", self._clamp_bottom_sash)
 
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
@@ -455,7 +457,7 @@ class NCViewer(tk.Tk):
         segf = ttk.LabelFrame(right, text="按段浏览", padding=8, style="Panel.TLabelframe")
         segf.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(4, 0))
         segf.columnconfigure(1, weight=1)
-        segf.rowconfigure(5, weight=1)
+        segf.rowconfigure(6, weight=1)      # 段列表随底部大栏高度伸缩
         ttk.Label(segf, text="抬刀平面 Z:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.lift_entry = ttk.Entry(segf, width=8)
         self.lift_entry.grid(row=0, column=1, sticky="ew", padx=4)
@@ -516,11 +518,11 @@ class NCViewer(tk.Tk):
         self._rot_data = None
 
     def _apply_default_sash(self):
-        """默认 sash: 底部大栏约占 45% 窗口高度"""
+        """默认 sash: 底部大栏约占 35% 窗口高度"""
         try:
             h = self.body_pane.winfo_height()
             if h > 300:
-                self.body_pane.sashpos(0, int(h * 0.55))
+                self.body_pane.sashpos(0, int(h * 0.65))
         except tk.TclError:
             pass
 
@@ -528,6 +530,18 @@ class NCViewer(tk.Tk):
         """启动稳定期内保持默认 sash (用户 3 秒后拖动自由)"""
         if time.time() < self._sash_until:
             self._apply_default_sash()
+
+    def _clamp_bottom_sash(self, e):
+        """底部大栏最小高度 25%: 拖动 sash 向下超过 75% 位置时钳回"""
+        try:
+            h = self.body_pane.winfo_height()
+            if h > 300:
+                pos = self.body_pane.sashpos(0)
+                max_pos = int(h * 0.75)
+                if pos > max_pos:
+                    self.body_pane.sashpos(0, max_pos)
+        except tk.TclError:
+            pass
 
     def _on_side_wheel(self, e):
         """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
