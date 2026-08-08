@@ -281,13 +281,13 @@ class NCViewer(tk.Tk):
 
         ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
 
-        # 当前位置: 只读框样式字段展示 (紧凑)
+        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行)
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
         posf.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
-        for r, axis in enumerate(("X", "Y", "Z")):
-            ttk.Label(posf, text=axis, style="Panel.TLabel",
+        for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行")):
+            ttk.Label(posf, text=key, style="Panel.TLabel",
                       font=("", 10, "bold")).grid(row=r, column=0, sticky="w")
             ent = tk.Entry(posf, width=10, state="readonly",
                            readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
@@ -296,10 +296,17 @@ class NCViewer(tk.Tk):
                            highlightbackground=theme.BORDER_LIGHT,
                            highlightcolor=theme.ACCENT)
             ent.grid(row=r, column=1, sticky="ew", padx=(6, 0), pady=1)
-            self.pos_fields[axis] = ent
-        self.pos_line_lbl = ttk.Label(posf, text="本行: -", style="Panel.TLabel",
-                                      font=theme.FONT_SMALL)
-        self.pos_line_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            self.pos_fields[key] = ent
+        # 本行: 原始代码行文本 (横跨两列)
+        ttk.Label(posf, text="本行", style="Panel.TLabel",
+                  font=("", 10, "bold")).grid(row=7, column=0, sticky="w")
+        self.pos_fields["本行"] = tk.Entry(posf, width=30, state="readonly",
+                                          readonlybackground=theme.INPUT_BG,
+                                          fg=theme.TEXT, font=theme.FONT_MONO,
+                                          relief="solid", bd=1, highlightthickness=1,
+                                          highlightbackground=theme.BORDER_LIGHT,
+                                          highlightcolor=theme.ACCENT)
+        self.pos_fields["本行"].grid(row=7, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
         # 刀具栏: 固定在侧栏底部 (滚动区之外, 紧挨底部行按行定位面板上沿)
         tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -1399,22 +1406,26 @@ class NCViewer(tk.Tk):
         self.loc_entry.delete(0, "end")
         self.loc_entry.insert(0, str(ln))
 
+    @staticmethod
+    def _set_field(ent, text):
+        ent.config(state="normal")
+        ent.delete(0, "end")
+        ent.insert(0, text)
+        ent.config(state="readonly")
+
     def _update_pos_info(self, ln):
         pos = self.result.position_at_line(ln)
         for axis, v in zip(("X", "Y", "Z"), pos):
-            ent = self.pos_fields[axis]
-            ent.config(state="normal")
-            ent.delete(0, "end")
-            ent.insert(0, f"{v:.3f}")
-            ent.config(state="readonly")
+            self._set_field(self.pos_fields[axis], f"{v:.3f}")
         m = self.move_by_line.get(ln)
-        if m is not None:
-            n_str = f"N{int(m.n_number)} " if m.n_number is not None else ""
-            f_str = ("G0" if m.motion == "G0"
-                     else f"{m.motion} F{format(m.feed, '.4f').rstrip('0').rstrip('.')}")
-            self.pos_line_lbl.config(text=f"行 {ln} | 本行: {n_str}{f_str}")
-        else:
-            self.pos_line_lbl.config(text=f"行 {ln} | 本行: 非移动指令")
+        self._set_field(self.pos_fields["S"],
+                        f"{m.s:g}" if m and m.s is not None else "-")
+        self._set_field(self.pos_fields["F"],
+                        f"{m.feed:g}" if m and m.feed is not None else "-")
+        self._set_field(self.pos_fields["G"], m.motion if m else "-")
+        self._set_field(self.pos_fields["行"], str(ln))
+        line_text = self.lines[ln - 1] if 1 <= ln <= len(self.lines) else ""
+        self._set_field(self.pos_fields["本行"], line_text)
 
     def _highlight_code_line(self, ln):
         self.code.tag_remove("cur", "1.0", "end")

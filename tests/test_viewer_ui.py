@@ -241,7 +241,7 @@ def test_tool_checkbox_in_toolbar(app):
 
 
 def test_position_fields_boxed_values(app, tmp_path):
-    """当前位置: 只读框展示 X/Y/Z 值"""
+    """当前位置: 只读框展示 X/Y/Z/S/F/G/行/本行"""
     p = tmp_path / "t.nc"
     p.write_text("G01X10Y20F1000\n", encoding="utf-8")
     app.open_file(str(p))
@@ -250,6 +250,11 @@ def test_position_fields_boxed_values(app, tmp_path):
     assert app.pos_fields["Y"].get() == "20.000"
     assert app.pos_fields["Z"].get() == "0.000"
     assert app.pos_fields["X"]["state"] == "readonly"
+    assert app.pos_fields["S"].get() == "-"        # 无 S
+    assert app.pos_fields["F"].get() == "1000"
+    assert app.pos_fields["G"].get() == "G1"
+    assert app.pos_fields["行"].get() == "1"
+    assert app.pos_fields["本行"].get() == "G01X10Y20F1000"
 
 
 def test_tool_profile_inline_drawn(app, tmp_path):
