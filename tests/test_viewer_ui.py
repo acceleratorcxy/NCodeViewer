@@ -55,6 +55,11 @@ def test_file_pane_has_no_open_file_button(app):
     assert _find(fs_frame, OPEN_TEXT) == []
 
 
+def test_file_listbox_wide_enough(app):
+    """文件列表应足够宽以容纳长文件名(字符宽度>=30)"""
+    assert int(app.file_listbox["width"]) >= 30
+
+
 def test_top_toolbar_keeps_open_file_entry(app):
     """顶部工具条应保留"打开文件…"入口(统一文件入口)"""
     assert _find(app, OPEN_TEXT), "顶部工具条缺少打开文件入口"
@@ -84,7 +89,39 @@ def test_canvas_uses_theme_bg(app):
 def test_theme_colors_valid():
     """主题颜色常量均为 #rrggbb 格式"""
     colors = [theme.BG, theme.PANEL, theme.INPUT_BG, theme.CANVAS_BG,
-              theme.TEXT, theme.TEXT_DIM, theme.BORDER, theme.ACCENT,
+              theme.EDITOR_BG, theme.TEXT, theme.TEXT_DIM,
+              theme.BORDER, theme.BORDER_LIGHT, theme.ACCENT,
               theme.ACCENT_HOVER, theme.SELECTION]
     for c in colors:
         assert re.fullmatch(r"#[0-9a-fA-F]{6}", c), f"非法颜色值: {c}"
+
+
+# ---------- 程序统计 / F 曲线 / 图例 ----------
+NC_SMALL = "G01X10Y20F1000\nG02X20Y0I5J0F2000\nG0X0Y0\n"
+
+
+def test_stats_panel_after_load(app, tmp_path):
+    """加载程序后统计面板显示预期数值"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    assert app.stats_labels["x"]["text"] == "0.000 ~ 20.000"
+    assert app.stats_labels["f"]["text"] == "1000 ~ 2000 · 2 档"
+    assert app.stats_labels["s"]["text"] == "-"
+    assert "G0:1" in app.stats_labels["g"]["text"]
+
+
+def test_f_curve_data_excludes_g0(app, tmp_path):
+    """F 曲线数据: 切削移动 (行号, F) 序列, G0 不参与"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    assert app._f_curve_data() == [(1, 1000.0), (2, 2000.0)]
+
+
+def test_legend_chips_present_after_load(app, tmp_path):
+    """加载程序后图例含色块与文字 (横向流式)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10F1000\nX20F2000\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert len(app.legend.winfo_children()) >= 4

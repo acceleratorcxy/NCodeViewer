@@ -44,6 +44,7 @@ class Move:
     cw: Optional[bool]              # 圆弧顺逆, 直线为 None
     plane: str                      # 'XY'/'XZ'/'YZ'
     feed: Optional[float]           # 进给, G0 为 None
+    s: Optional[float] = None       # 主轴转速, G0 为 None (与 feed 同规则)
 
 
 @dataclass
@@ -68,6 +69,79 @@ class ParseResult:
         return self.n_to_line.get(int(n))
 
 
+@dataclass
+class ProgramStats:
+    """程序统计 (供侧栏面板与详情页展示)"""
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    z_min: float
+    z_max: float
+    s_min: Optional[float] = None       # 无 S 则为 None
+    s_max: Optional[float] = None
+    f_min: Optional[float] = None       # 无切削移动则为 None
+    f_max: Optional[float] = None
+    f_count: int = 0                    # F 档位数
+    g_counts: dict = field(default_factory=dict)   # {'G0': n, 'G1': n, ...}
+    moves_total: int = 0
+    cut_total: int = 0                  # 切削段数 (G1/G2/G3)
+    f_seg_counts: dict = field(default_factory=dict)  # {feed: 段数}
+
+
+def compute_stats(result: ParseResult) -> ProgramStats:
+    """从 ParseResult 计算程序统计。
+
+    行程按刀路端点(不包含原点)计算, 避免 bbox 含原点导致行程虚高。
+    """
+    if not result.moves:
+        return ProgramStats(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    x_min = y_min = z_min = float("inf")
+    x_max = y_max = z_max = float("-inf")
+    s_values: list = []
+    f_values: list = []
+    f_seg_counts: dict = {}
+    g_counts: dict = {}
+    cut_total = 0
+
+    for m in result.moves:
+        for p in (m.start, m.end):
+            x, y, z = p
+            if x < x_min: x_min = x
+            if x > x_max: x_max = x
+            if y < y_min: y_min = y
+            if y > y_max: y_max = y
+            if z < z_min: z_min = z
+            if z > z_max: z_max = z
+        if m.s is not None:
+            s_values.append(m.s)
+        if m.motion != "G0":
+            cut_total += 1
+            if m.feed is not None:
+                f_values.append(m.feed)
+                f_seg_counts[m.feed] = f_seg_counts.get(m.feed, 0) + 1
+        g_counts[m.motion] = g_counts.get(m.motion, 0) + 1
+
+    f_min = min(f_values) if f_values else None
+    f_max = max(f_values) if f_values else None
+    s_min = min(s_values) if s_values else None
+    s_max = max(s_values) if s_values else None
+
+    return ProgramStats(
+        x_min=x_min, x_max=x_max,
+        y_min=y_min, y_max=y_max,
+        z_min=z_min, z_max=z_max,
+        s_min=s_min, s_max=s_max,
+        f_min=f_min, f_max=f_max,
+        f_count=len(result.feeds),
+        g_counts=g_counts,
+        moves_total=len(result.moves),
+        cut_total=cut_total,
+        f_seg_counts=f_seg_counts,
+    )
+
+
 def parse_nc(text: str) -> ParseResult:
     moves: list = []
     line_positions: dict = {}
@@ -78,6 +152,7 @@ def parse_nc(text: str) -> ParseResult:
     # 模态状态
     motion: Optional[str] = None
     feed: Optional[float] = None
+    spindle: Optional[float] = None
     plane = "XY"
     absolute = True
     x = y = z = 0.0
@@ -124,6 +199,9 @@ def parse_nc(text: str) -> ParseResult:
         if "F" in word_dict:
             feed = word_dict["F"]
 
+        if "S" in word_dict:
+            spindle = word_dict["S"]
+
         # 计算新坐标
         has_coord = any(k in word_dict for k in ("X", "Y", "Z"))
         new_x, new_y, new_z = x, y, z
@@ -164,6 +242,7 @@ def parse_nc(text: str) -> ParseResult:
                 cw=cw,
                 plane=plane,
                 feed=(feed if motion != "G0" else None),
+                s=(spindle if motion != "G0" else None),
             ))
             # 仅切削移动收集 F (用于配色)
             if motion != "G0" and feed is not None and feed not in feed_seen:

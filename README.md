@@ -12,6 +12,8 @@
 - 代码搜索定位与跳转
 - 轨道球（四元数 ArcBall）旋转：中键旋转 / 左键平移 / 滚轮缩放，旋转中心不漂移
 - 深色现代化界面（ttk clam 定制主题，纯标准库，兼容 Win7）
+- 程序统计：X/Y/Z 行程、S/F 范围、G 次数等关键指标 + 详情二级窗口
+- F 进给趋势曲线：按 F 档位着色的折线图二级窗口
 
 ## 文档
 
@@ -56,7 +58,7 @@ nc-viewer
 python -m pytest
 ```
 
-共 42 例：解析（28）+ 几何（7）+ 界面结构（7）。遵循 TDD，改动后需全绿（green）再打包。
+共 51 例：解析（33）+ 几何（7）+ 界面结构（11）。遵循 TDD，改动后需全绿（green）再打包。
 
 ## 打包 EXE
 
@@ -79,7 +81,7 @@ NCodeViewer/
 │   ├── theme.py          # 深色现代化主题（配色/字体常量 + apply_theme）
 │   ├── viewer.py         # Tkinter 主窗口
 │   └── __main__.py       # python -m nc_viewer 入口
-├── tests/                # pytest 单元测试（39 例）
+├── tests/                # pytest 单元测试（51 例）
 │   ├── test_parser.py
 │   ├── test_geometry.py
 │   └── test_viewer_ui.py

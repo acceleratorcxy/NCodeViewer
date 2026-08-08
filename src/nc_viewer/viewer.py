@@ -18,13 +18,14 @@ import math
 import os
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from . import theme
 from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
-from .parser import parse_nc
+from .parser import compute_stats, parse_nc
 
 
 def _sample_dir():
@@ -48,6 +49,8 @@ class NCViewer(tk.Tk):
         self.configure(bg=theme.BG)
         self.title("NC 刀路查看器")
         self.geometry("1280x820")
+        # 布局可缩放下限: 再小则画布/侧栏失去可用性
+        self.minsize(960, 560)
 
         self.result = None
         self.lines = []
@@ -70,14 +73,17 @@ class NCViewer(tk.Tk):
         self._search_hits = []
         self._search_idx = -1
 
+        self._current_path = None        # 当前文件的完整路径 (供二级窗口标题)
+
         self._build_ui()
         self._bind_canvas()
 
     # ------------- UI -------------
     def _build_ui(self):
-        # 顶部工具条
+        # 顶部工具条 (分隔线先 pack, 占满整行; 后 pack 的按钮在其上方排列)
         top = ttk.Frame(self, padding=6)
         top.pack(side="top", fill="x")
+        ttk.Separator(top, orient="horizontal").pack(side="bottom", fill="x", pady=(6, 0))
         ttk.Button(top, text="打开文件…", style=theme.BTN_ACCENT,
                    command=self.open_file_multi).pack(side="left")
         ttk.Button(top, text="适配", command=self.fit_view).pack(side="left", padx=(8, 0))
@@ -101,17 +107,19 @@ class NCViewer(tk.Tk):
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
 
-        # 左侧文件栏: 一次加载多个文件, 随时切换
-        fs_frame = ttk.Frame(upper, width=200, padding=6)
+        # 左侧文件栏: 一次加载多个文件, 随时切换 (面板样式, 与画布区分)
+        fs_frame = ttk.Frame(upper, width=280, padding=6, style="Panel.TFrame")
         upper.add(fs_frame, weight=0)
         fs_frame.columnconfigure(0, weight=1)
-        ttk.Label(fs_frame, text="文件列表", font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.file_listbox = tk.Listbox(fs_frame, exportselection=False, activestyle="dotbox",
+        ttk.Label(fs_frame, text="文件列表", font=("", 10, "bold"),
+                  style="Panel.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.file_listbox = tk.Listbox(fs_frame, width=34, exportselection=False,
+                                       activestyle="dotbox",
                                        selectmode="browse", relief="flat", highlightthickness=1,
                                        bg=theme.PANEL, fg=theme.TEXT,
                                        selectbackground=theme.SELECTION,
                                        selectforeground="#ffffff",
-                                       highlightbackground=theme.BORDER,
+                                       highlightbackground=theme.BORDER_LIGHT,
                                        highlightcolor=theme.ACCENT)
         self.file_listbox.grid(row=1, column=0, sticky="nsew")
         fsb = ttk.Scrollbar(fs_frame, orient="vertical", command=self.file_listbox.yview)
@@ -128,19 +136,39 @@ class NCViewer(tk.Tk):
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
 
-        # 侧栏: 图例 + 定位
-        side = ttk.Frame(upper, width=260, padding=8)
+        # 侧栏: 图例 + 定位 (面板样式, 与画布区分)
+        side = ttk.Frame(upper, width=260, padding=8, style="Panel.TFrame")
         upper.add(side, weight=0)
         side.columnconfigure(0, weight=1)
 
-        ttk.Label(side, text="颜色图例", font=("", 10, "bold")).grid(row=0, column=0, sticky="w")
-        self.legend = ttk.Frame(side)
-        self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 12))
-        side.rowconfigure(1, weight=1)
+        ttk.Label(side, text="颜色图例", font=("", 10, "bold"),
+                  style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.legend = ttk.Frame(side, style="Panel.TFrame")
+        self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
+        # 图例行可弹性伸缩但保底 1 行高度, 窗口缩小时图例不会被裁没
+        side.rowconfigure(1, weight=1, minsize=44)
 
-        ttk.Separator(side, orient="horizontal").grid(row=2, column=0, sticky="ew")
-        loc = ttk.LabelFrame(side, text="按行定位", padding=8)
-        loc.grid(row=3, column=0, sticky="ew", pady=8)
+        # 程序统计 (仅关键指标; 完整统计在「详情…」二级窗口)
+        st = ttk.LabelFrame(side, text="程序统计", padding=8, style="Panel.TLabelframe")
+        st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        st.columnconfigure(1, weight=1)
+        self.stats_labels = {}
+        for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
+                                         ("z", "行程 Z"), ("s", "S 转速"),
+                                         ("f", "F 进给"), ("g", "G 次数"))):
+            ttk.Label(st, text=text, style="Panel.TLabel").grid(row=r, column=0, sticky="w", pady=1)
+            lbl = ttk.Label(st, text="-", font=theme.FONT_MONO, style="Panel.TLabel")
+            lbl.grid(row=r, column=1, sticky="e", pady=1)
+            self.stats_labels[key] = lbl
+        btns = ttk.Frame(st, style="Panel.TFrame")
+        btns.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(btns, text="详情…", style=theme.BTN_ACCENT,
+                   command=self.show_details).pack(side="left")
+        ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
+
+        ttk.Separator(side, orient="horizontal").grid(row=3, column=0, sticky="ew")
+        loc = ttk.LabelFrame(side, text="按行定位", padding=8, style="Panel.TLabelframe")
+        loc.grid(row=4, column=0, sticky="ew", pady=8)
         loc.columnconfigure(1, weight=1)
         ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
         self.loc_entry = ttk.Entry(loc)
@@ -152,8 +180,8 @@ class NCViewer(tk.Tk):
         ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(row=2, column=1, pady=(6, 0), sticky="w")
 
         # 搜索定位
-        sr = ttk.LabelFrame(side, text="搜索定位", padding=8)
-        sr.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        sr = ttk.LabelFrame(side, text="搜索定位", padding=8, style="Panel.TLabelframe")
+        sr.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         sr.columnconfigure(1, weight=1)
         ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
         self._search_entry = ttk.Entry(sr)
@@ -163,8 +191,9 @@ class NCViewer(tk.Tk):
         ttk.Button(sr, text="下一个", command=lambda: self.search_nc(next_=True)).grid(row=1, column=1, sticky="w", pady=(6, 0))
         ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        self.pos_lbl = ttk.Label(side, text="当前位置: -", justify="left", font=theme.FONT_MONO)
-        self.pos_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.pos_lbl = ttk.Label(side, text="当前位置: -", justify="left",
+                                 font=theme.FONT_MONO, style="Panel.TLabel")
+        self.pos_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
 
         # 代码列表
         code_frame = ttk.Frame(body)
@@ -177,7 +206,11 @@ class NCViewer(tk.Tk):
         self.code = tk.Text(cvsb, wrap="none", font=theme.FONT_MONO, height=12,
                             xscrollcommand=xsb.set, yscrollcommand=ysb.set,
                             undo=False, cursor="arrow",
-                            bg=theme.BG, fg=theme.TEXT, insertbackground=theme.TEXT)
+                            bg=theme.EDITOR_BG, fg=theme.TEXT,
+                            insertbackground=theme.TEXT,
+                            highlightthickness=1,
+                            highlightbackground=theme.BORDER_LIGHT,
+                            highlightcolor=theme.ACCENT)
         xsb.config(command=self.code.xview)
         ysb.config(command=self.code.yview)
         self.code.pack(side="left", fill="both", expand=True)
@@ -278,6 +311,7 @@ class NCViewer(tk.Tk):
         self.move_by_line = item["move_by_line"]
         self._disp3d = item["disp3d"]
         self._move_index = item["move_index"]
+        self._current_path = path
         self.current_line = None
         # 重置搜索状态(代码内容已重建, 旧命中行号失效)
         self._search_pattern = None
@@ -286,6 +320,7 @@ class NCViewer(tk.Tk):
         self.file_lbl.config(text=os.path.basename(path))
         self._fill_code()
         self._fill_legend()
+        self._fill_stats()
         self.fit_view()
         self.status.config(text=self._status_text())
         # 高亮文件栏当前项
@@ -329,15 +364,181 @@ class NCViewer(tk.Tk):
     def _fill_legend(self):
         for w in self.legend.winfo_children():
             w.destroy()
-        # G0
-        self._legend_row(0, G0_COLOR, "G0  快速移动")
-        for i, f in enumerate(self.result.feeds, 1):
-            self._legend_row(i, self.palette[f], f"F{format(f, '.4f').rstrip('0').rstrip('.')}")
+        items = [(G0_COLOR, "G0 快速移动")] + [
+            (self.palette[f], f"F{format(f, '.4f').rstrip('0').rstrip('.')}")
+            for f in self.result.feeds
+        ]
+        # 横向流式排布: 按字体测量宽度, 超出面板宽度自动换行 (多行)
+        font = tkfont.Font(font=theme.FONT_UI)
+        max_w = max(self.legend.winfo_width(), 260)
+        row = 0
+        col = 0
+        used = 0
+        for color, text in items:
+            chip_w = 22 + font.measure(text) + 12
+            if col > 0 and used + chip_w > max_w:
+                row += 1
+                col = 0
+                used = 0
+            sw = tk.Label(self.legend, bg=color, width=2, height=1, relief="flat")
+            sw.grid(row=row, column=col * 2, padx=(0, 5), pady=1, sticky="w")
+            ttk.Label(self.legend, text=text, style="Panel.TLabel").grid(
+                row=row, column=col * 2 + 1, sticky="w", padx=(0, 12))
+            col += 1
+            used += chip_w
 
-    def _legend_row(self, row, color, text):
-        sw = tk.Label(self.legend, bg=color, width=3, height=1, relief="flat")
-        sw.grid(row=row, column=0, padx=(0, 6), pady=1, sticky="w")
-        ttk.Label(self.legend, text=text).grid(row=row, column=1, sticky="w")
+    # ------------- 程序统计 -------------
+    def _fill_stats(self):
+        """刷新侧栏关键统计 (行程/S/F/G 次数)"""
+        st = compute_stats(self.result)
+        fmt = lambda v: f"{v:.3f}"
+        self.stats_labels["x"].config(text=f"{fmt(st.x_min)} ~ {fmt(st.x_max)}")
+        self.stats_labels["y"].config(text=f"{fmt(st.y_min)} ~ {fmt(st.y_max)}")
+        self.stats_labels["z"].config(text=f"{fmt(st.z_min)} ~ {fmt(st.z_max)}")
+        s_txt = "-" if st.s_min is None else f"{st.s_min:.0f} ~ {st.s_max:.0f}"
+        self.stats_labels["s"].config(text=s_txt)
+        f_txt = "-" if st.f_min is None else f"{st.f_min:g} ~ {st.f_max:g} · {st.f_count} 档"
+        self.stats_labels["f"].config(text=f_txt)
+        g = st.g_counts
+        g_txt = "  ".join(f"G{i}:{g.get(f'G{i}', 0)}" for i in (0, 1, 2, 3))
+        self.stats_labels["g"].config(text=g_txt)
+
+    def show_details(self):
+        """二级窗口: 完整程序统计"""
+        if not self.result:
+            return
+        st = compute_stats(self.result)
+        win = tk.Toplevel(self)
+        win.title(f"程序详情 — {os.path.basename(self._current_path)}")
+        win.configure(bg=theme.BG)
+        win.geometry("560x520")
+        frm = ttk.Frame(win, padding=12, style="Panel.TFrame")
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        fmt = lambda v: f"{v:.3f}"
+        rows = [
+            ("行数", str(len(self.lines))),
+            ("刀路段数", str(st.moves_total)),
+            ("切削段数 (G1/G2/G3)", f"{st.cut_total}  (快移 {st.moves_total - st.cut_total})"),
+            ("行程 X", f"{fmt(st.x_min)} ~ {fmt(st.x_max)}"),
+            ("行程 Y", f"{fmt(st.y_min)} ~ {fmt(st.y_max)}"),
+            ("行程 Z", f"{fmt(st.z_min)} ~ {fmt(st.z_max)}"),
+            ("S 转速", "-" if st.s_min is None else f"{st.s_min:.0f} ~ {st.s_max:.0f}"),
+            ("F 进给", "-" if st.f_min is None else f"{st.f_min:g} ~ {st.f_max:g} · {st.f_count} 档"),
+        ]
+        for r, (k, v) in enumerate(rows):
+            ttk.Label(frm, text=k, style="Panel.TLabel").grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Label(frm, text=v, font=theme.FONT_MONO, style="Panel.TLabel").grid(
+                row=r, column=1, sticky="w", pady=2)
+        r0 = len(rows)
+        ttk.Label(frm, text="各 F 档位段数", style="Panel.TLabel").grid(
+            row=r0, column=0, sticky="w", pady=(8, 2))
+        for r, f in enumerate(self.result.feeds):
+            n = st.f_seg_counts.get(f, 0)
+            pct = (n / st.cut_total * 100) if st.cut_total else 0.0
+            f_str = f"F{format(f, '.4f').rstrip('0').rstrip('.')}"
+            ttk.Label(frm, text=f_str, style="Panel.TLabel").grid(
+                row=r0 + 1 + r, column=0, sticky="w", pady=1)
+            ttk.Label(frm, text=f"{n} 段 ({pct:.1f}%)", font=theme.FONT_MONO,
+                      style="Panel.TLabel").grid(row=r0 + 1 + r, column=1, sticky="w", pady=1)
+        g = st.g_counts
+        g_txt = "  ".join(f"G{i}: {g.get(f'G{i}', 0)}" for i in (0, 1, 2, 3))
+        r_last = r0 + 1 + len(self.result.feeds)
+        ttk.Label(frm, text="G 指令次数", style="Panel.TLabel").grid(
+            row=r_last, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(frm, text=g_txt, font=theme.FONT_MONO, style="Panel.TLabel").grid(
+            row=r_last, column=1, sticky="w", pady=(8, 2))
+
+    # ------------- F 进给趋势曲线 -------------
+    def _f_curve_data(self):
+        """切削移动的 (行号, F) 序列 (G0 快移无 F, 不参与)"""
+        return [(m.line_number, m.feed) for m in self.result.moves if m.feed is not None]
+
+    def show_f_curve(self):
+        """二级窗口: F 进给随行号变化趋势 (按 F 档位着色)"""
+        if not self.result:
+            return
+        data = self._f_curve_data()
+        if not data:
+            messagebox.showinfo("F 曲线", "程序中没有切削移动 (G0 快移无 F)")
+            return
+        win = tk.Toplevel(self)
+        win.title(f"F 进给趋势 — {os.path.basename(self._current_path)}")
+        win.configure(bg=theme.BG)
+        win.resizable(False, False)
+        W, H = 720, 430
+        cv = tk.Canvas(win, bg=theme.EDITOR_BG, highlightthickness=0, width=W, height=H)
+        cv.pack(padx=8, pady=(8, 0))
+        win.update_idletasks()
+
+        pad_l, pad_r, pad_t, pad_b = 52, 20, 30, 38
+        plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
+        lines = [ln for ln, _ in data]
+        feeds = [f for _, f in data]
+        fmin, fmax = min(feeds), max(feeds)
+        if fmax == fmin:
+            fmax = fmin + 1.0
+        ln0, ln1 = lines[0], lines[-1]
+        if ln1 == ln0:
+            ln1 = ln0 + 1
+        fmt_axis = lambda v: f"{v:.0f}" if v >= 100 else f"{v:g}"
+
+        def sx(x):
+            return pad_l + (x - ln0) / (ln1 - ln0) * plot_w
+
+        def sy(v):
+            return pad_t + (1 - (v - fmin) / (fmax - fmin)) * plot_h
+
+        # 网格 + 刻度 (每轴 6 档)
+        for i in range(6):
+            v = fmin + (fmax - fmin) * i / 5
+            y = sy(v)
+            cv.create_line(pad_l, y, W - pad_r, y, fill=theme.BORDER, tags="grid")
+            cv.create_text(pad_l - 8, y, text=fmt_axis(v), anchor="e",
+                           fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
+        for i in range(6):
+            x = ln0 + (ln1 - ln0) * i / 5
+            xx = sx(x)
+            cv.create_line(xx, pad_t, xx, H - pad_b, fill=theme.BORDER, tags="grid")
+            cv.create_text(xx, H - pad_b + 8, text=f"{x:.0f}", anchor="n",
+                           fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
+        # 坐标轴与标题
+        cv.create_line(pad_l, pad_t, pad_l, H - pad_b, fill=theme.TEXT_DIM)
+        cv.create_line(pad_l, H - pad_b, W - pad_r, H - pad_b, fill=theme.TEXT_DIM)
+        cv.create_text(W // 2, H - 6, text="行号", fill=theme.TEXT, font=theme.FONT_UI)
+        cv.create_text(6, pad_t, text="F 进给", anchor="w", fill=theme.TEXT, font=theme.FONT_UI)
+        # min/max F 参考虚线
+        for v in (fmin, fmax):
+            y = sy(v)
+            cv.create_line(pad_l, y, W - pad_r, y, fill=theme.TEXT_DIM, dash=(3, 3))
+            cv.create_text(W - pad_r - 4, y - 4, text=f"F{fmt_axis(v)}", anchor="e",
+                           fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
+        # 折线: 相邻同 F 合并为折线, 按 F 档位着色
+        palette = self.palette
+        polylines = []  # [(color, [x1, y1, x2, y2, ...])]
+        for ln, f in data:
+            x, y = sx(ln), sy(f)
+            key = palette.get(f, "#ffffff")
+            if polylines and polylines[-1][0] == key:
+                polylines[-1][1].extend([x, y])
+            else:
+                polylines.append([key, [x, y]])
+        for color, pts in polylines:
+            if len(pts) >= 4:
+                cv.create_line(pts, fill=color, width=2, joinstyle="round", tags="curve")
+            else:
+                cv.create_oval(pts[0] - 3, pts[1] - 3, pts[0] + 3, pts[1] + 3,
+                               fill=color, outline="", tags="curve")
+        # 档位图例 (右下角)
+        ly = pad_t + 10
+        for f in self.result.feeds:
+            col = palette[f]
+            cv.create_rectangle(W - pad_r - 140, ly, W - pad_r - 128, ly + 10,
+                                fill=col, outline="")
+            cv.create_text(W - pad_r - 124, ly + 5,
+                           text=f"F{format(f, '.4f').rstrip('0').rstrip('.')}",
+                           anchor="w", fill=theme.TEXT, font=theme.FONT_SMALL)
+            ly += 18
 
     # ------------- 坐标变换 -------------
     def world_to_canvas(self, wx, wy):

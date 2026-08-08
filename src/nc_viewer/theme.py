@@ -12,13 +12,15 @@ from __future__ import annotations
 from tkinter import ttk
 
 # ---------- 配色 (VS Code 风格深色) ----------
-BG = "#1e1e1e"              # 窗口/面板/代码区背景
-PANEL = "#252526"           # 侧栏/文件栏次级背景
+BG = "#1e1e1e"              # 窗口/工具栏/画布背景
+PANEL = "#252526"           # 侧栏/文件栏面板背景 (与 BG 区分层次)
+EDITOR_BG = "#1a1a1a"       # 代码编辑器背景 (比画布更暗, 区域对比)
 INPUT_BG = "#2d2d30"        # 输入框背景
 CANVAS_BG = "#1e1e1e"       # 刀路画布背景
 TEXT = "#d4d4d4"            # 主文字
 TEXT_DIM = "#9d9d9d"        # 次要文字/行号
-BORDER = "#3f3f46"          # 边框/分隔线
+BORDER = "#3f3f46"          # 普通边框/分隔线
+BORDER_LIGHT = "#4a4a52"    # 提亮边框 (面板/分组框/输入框, 区域分界可见)
 ACCENT = "#0e639c"          # 强调色 (主按钮/选中)
 ACCENT_HOVER = "#1177bb"    # 强调色悬停
 SELECTION = "#094771"       # 列表/代码选中背景
@@ -41,11 +43,19 @@ def apply_theme(root):
     # 基础容器与文字
     style.configure("TFrame", background=BG)
     style.configure("TLabel", background=BG, foreground=TEXT, font=FONT_UI)
-    style.configure("TLabelframe", background=BG, bordercolor=BORDER,
-                    lightcolor=BORDER, darkcolor=BORDER, font=FONT_UI)
+    style.configure("TLabelframe", background=BG, bordercolor=BORDER_LIGHT,
+                    lightcolor=BORDER_LIGHT, darkcolor=BORDER_LIGHT, font=FONT_UI)
     style.configure("TLabelframe.Label", background=BG, foreground=TEXT, font=FONT_UI)
     style.configure("TSeparator", background=BORDER)
-    style.configure("TPanedwindow", background=BG)
+    # 面板 sash 用边框色, 区域分隔线清晰可见
+    style.configure("TPanedwindow", background=BORDER)
+
+    # 面板 (侧栏/文件栏): 次级背景 + 提亮边框, 与主背景形成层次
+    style.configure("Panel.TFrame", background=PANEL)
+    style.configure("Panel.TLabel", background=PANEL, foreground=TEXT, font=FONT_UI)
+    style.configure("Panel.TLabelframe", background=PANEL, bordercolor=BORDER_LIGHT,
+                    lightcolor=BORDER_LIGHT, darkcolor=BORDER_LIGHT, font=FONT_UI)
+    style.configure("Panel.TLabelframe.Label", background=PANEL, foreground=TEXT, font=FONT_UI)
 
     # 按钮: clam 支持 active 状态, 悬停自动高亮
     style.configure(BTN, background=PANEL, foreground=TEXT, bordercolor=BORDER,
@@ -65,8 +75,8 @@ def apply_theme(root):
 
     # 输入框
     style.configure("TEntry", fieldbackground=INPUT_BG, foreground=TEXT,
-                    insertcolor=TEXT, bordercolor=BORDER,
-                    lightcolor=BORDER, darkcolor=BORDER, padding=3)
+                    insertcolor=TEXT, bordercolor=BORDER_LIGHT,
+                    lightcolor=BORDER_LIGHT, darkcolor=BORDER_LIGHT, padding=3)
 
     # 复选框
     style.configure("TCheckbutton", background=BG, foreground=TEXT,

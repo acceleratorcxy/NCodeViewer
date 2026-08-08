@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from nc_viewer.parser import Move, parse_nc
+from nc_viewer.parser import Move, compute_stats, parse_nc
 
 
 # ---------- 基础线性移动 ----------
@@ -246,3 +246,61 @@ def test_real_sample_first_moves_parse_correctly():
     assert r.feeds == [3000.0, 6000.0, 300.0]
     # 第4行(N6)位置
     assert r.position_at_line(4) == (-334.446, 167.432, 100.0)
+
+
+# ---------- S 主轴转速 ----------
+def test_s_spindle_is_modal():
+    text = "G01X10F300S5000\nX20\nX30S8000\nX40"
+    r = parse_nc(text)
+    assert r.moves[0].s == 5000.0
+    assert r.moves[1].s == 5000.0   # 模态保留
+    assert r.moves[2].s == 8000.0
+    assert r.moves[3].s == 8000.0
+
+
+def test_s_none_when_absent_and_for_g0():
+    text = "G01X10F300\nG0X20"
+    r = parse_nc(text)
+    assert r.moves[0].s is None
+    assert r.moves[1].s is None    # G0 快移不记录转速
+
+
+# ---------- 程序统计 ----------
+def test_compute_stats_ranges_and_counts():
+    # X 范围 -3..10, Y 范围 -5..20, Z 范围 -2..1 (端点, 不含原点)
+    # S: 5000..8000; F: 1000/2000 两档; G0:1 G1:1 G2:1
+    text = ("G01X10Y-5Z-2F1000S5000\n"
+            "G02X-3Y20Z1I0J5F2000S8000\n"
+            "G0X0Y0Z0\n")
+    r = parse_nc(text)
+    st = compute_stats(r)
+    assert (st.x_min, st.x_max) == (-3.0, 10.0)
+    assert (st.y_min, st.y_max) == (-5.0, 20.0)
+    assert (st.z_min, st.z_max) == (-2.0, 1.0)
+    assert (st.s_min, st.s_max) == (5000.0, 8000.0)
+    assert (st.f_min, st.f_max) == (1000.0, 2000.0)
+    assert st.f_count == 2
+    assert st.g_counts == {"G1": 1, "G2": 1, "G0": 1}
+    assert st.moves_total == 3
+    assert st.cut_total == 2
+    assert st.f_seg_counts == {1000.0: 1, 2000.0: 1}
+
+
+def test_compute_stats_empty_program():
+    r = parse_nc("\nM08\n")
+    st = compute_stats(r)
+    assert (st.x_min, st.x_max) == (0.0, 0.0)
+    assert st.s_min is None and st.s_max is None
+    assert st.f_min is None and st.f_max is None
+    assert st.f_count == 0
+    assert st.g_counts == {}
+    assert st.moves_total == 0 and st.cut_total == 0
+
+
+def test_compute_stats_f_excludes_g0_rapid():
+    text = "G0X10\nG01X20F1000\nG0X30"
+    r = parse_nc(text)
+    st = compute_stats(r)
+    assert (st.f_min, st.f_max) == (1000.0, 1000.0)
+    assert st.cut_total == 1
+    assert st.g_counts == {"G0": 2, "G1": 1}
