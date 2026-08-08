@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+# PyInstaller 每次构建自动重新生成的 spec, 构建以 build_exe.bat 为准
+*.spec
+
+# --- 测试缓存 ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- IDE / 系统 ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# --- 隐私 / 本地文件(不入库) ---
+# 样例文件仅本地测试用
+样例文件/
+# 本地版文档可能含本机路径等隐私信息
+docs/本地版/
