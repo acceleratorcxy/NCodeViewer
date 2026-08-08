@@ -66,25 +66,26 @@ def _compute_lead_skip(moves):
 
 
 def _make_scroll_col(parent):
-    """竖向滚动列容器: 返回 (box, canvas, inner)。
+    """双轴滚动列容器: 返回 (box, canvas, inner)。
 
-    宽度随内容 (无需横向滚动); 内容高度超出时竖向滚动条生效。
+    默认宽度随内容 (无需横向滚动); 被挤窄时横向滚动条出现,
+    内容高度超出时竖向滚动条生效。
     """
     box = ttk.Frame(parent, style="Panel.TFrame")
     box.columnconfigure(0, weight=1)
     box.rowconfigure(0, weight=1)
     canvas = tk.Canvas(box, bg=theme.PANEL, highlightthickness=0)
     vsb = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
-    canvas.config(yscrollcommand=vsb.set)
+    hsb = ttk.Scrollbar(box, orient="horizontal", command=canvas.xview)
+    canvas.config(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
     canvas.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
     inner = ttk.Frame(canvas, style="Panel.TFrame")
     win = canvas.create_window((0, 0), window=inner, anchor="nw")
-    inner.bind("<Configure>", lambda e, c=canvas: c.configure(
-        scrollregion=c.bbox("all")))
-    canvas.bind("<Configure>",
-                lambda e, c=canvas, i=inner, w=win: c.itemconfigure(
-                    w, width=max(e.width, i.winfo_reqwidth())))
+    inner.bind("<Configure>", lambda e, c=canvas, i=inner, w=win: (
+        c.itemconfigure(w, width=i.winfo_reqwidth()),   # 内容保持自然宽度
+        c.configure(scrollregion=c.bbox("all"))))       # 画布窄于内容时横滚
     return box, canvas, inner
 
 
@@ -379,7 +380,7 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 表格布局 (XYZ / SFG / 行段 各一行, 本行全宽)
+        # 当前位置: 表格布局 (标签行在上, 值行在下; XYZ / SFG / 行段, 本行全宽)
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
         posf.grid(row=1, column=0, sticky="ew", pady=(0, 2))
         self.pos_fields = {}
@@ -387,27 +388,31 @@ class NCViewer(tk.Tk):
             for c, k in enumerate(keys):
                 col = c * 2
                 posf.columnconfigure(col + 1, weight=1)
+                # 标签行
                 ttk.Label(posf, text=k, style="Panel.TLabel",
-                          font=("", 9, "bold")).grid(row=r, column=col, sticky="w")
-                ent = tk.Entry(posf, width=8, state="readonly",
+                          font=("", 9, "bold")).grid(row=r * 2, column=col,
+                                                     columnspan=2, sticky="w")
+                # 值行 (9 位数字+小数点+符号)
+                ent = tk.Entry(posf, width=11, state="readonly",
                                readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
                                font=theme.FONT_MONO, justify="left",
                                relief="solid", bd=1, highlightthickness=1,
                                highlightbackground=theme.BORDER_LIGHT,
                                highlightcolor=theme.ACCENT)
-                ent.grid(row=r, column=col + 1, sticky="ew", padx=(2, 6), pady=1)
+                ent.grid(row=r * 2 + 1, column=col, columnspan=2,
+                         sticky="ew", padx=(0, 6), pady=(0, 3))
                 self.pos_fields[k] = ent
         # 本行: 原始代码行文本 (全宽)
         ttk.Label(posf, text="本行", style="Panel.TLabel",
-                  font=("", 9, "bold")).grid(row=3, column=0, sticky="w", pady=(2, 0))
+                  font=("", 9, "bold")).grid(row=6, column=0, sticky="w", pady=(2, 0))
         self.pos_fields["本行"] = tk.Entry(posf, width=30, state="readonly",
                                           readonlybackground=theme.INPUT_BG,
                                           fg=theme.TEXT, font=theme.FONT_MONO,
                                           relief="solid", bd=1, highlightthickness=1,
                                           highlightbackground=theme.BORDER_LIGHT,
                                           highlightcolor=theme.ACCENT)
-        self.pos_fields["本行"].grid(row=3, column=1, columnspan=5, sticky="ew",
-                                     padx=(2, 0), pady=(2, 0))
+        self.pos_fields["本行"].grid(row=7, column=0, columnspan=6, sticky="ew",
+                                     padx=(0, 0), pady=(2, 0))
 
         # 刀具栏: 固定自然高度之外的剩余空间全部给刀具 (最小 240)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -432,7 +437,10 @@ class NCViewer(tk.Tk):
         code_split = ttk.Panedwindow(body, orient="horizontal")
         body.add(code_split, weight=2)
         self.code_split = code_split
-        # 两侧栏最小宽度: 文件栏>=200, 侧栏>=240, 右栏>=430 (画布优先压缩)
+        # 两侧栏最小宽度 (字体测量): 文件栏>=15字符+空余, 侧栏>=240, 右栏>=3个11字符单元
+        _mf = tkfont.Font(font=theme.FONT_MONO)
+        self._min_fs = _mf.measure("0" * 15) + 36
+        self._min_right = 3 * (_mf.measure("0" * 11) + 24) + 44
         upper.bind("<B1-Motion>", self._clamp_pane_mins)
         upper.bind("<Configure>", self._clamp_pane_mins, add="+")
         code_split.bind("<B1-Motion>", self._clamp_pane_mins)
@@ -617,19 +625,19 @@ class NCViewer(tk.Tk):
             pass
 
     def _clamp_pane_mins(self, e):
-        """两侧栏最小宽度 (画布优先被压缩): 文件栏>=200, 侧栏>=240, 右栏>=430"""
+        """两侧栏最小宽度 (画布优先被压缩): 文件栏≥15字符, 侧栏≥240, 右栏≥3×11字符"""
         try:
             up = self.upper_pane
             uw = up.winfo_width()
             if uw > 100:
-                if up.sashpos(0) < 200:
-                    up.sashpos(0, 200)
+                if up.sashpos(0) < self._min_fs:
+                    up.sashpos(0, self._min_fs)
                 if uw - up.sashpos(1) < 240:
                     up.sashpos(1, uw - 240)
             cs = self.code_split
             cw = cs.winfo_width()
-            if cw > 100 and cw - cs.sashpos(0) < 430:
-                cs.sashpos(0, cw - 430)
+            if cw > 100 and cw - cs.sashpos(0) < self._min_right:
+                cs.sashpos(0, cw - self._min_right)
         except tk.TclError:
             pass
 
