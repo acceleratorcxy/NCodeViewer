@@ -70,6 +70,68 @@ class ParseResult:
 
 
 @dataclass
+class Segment:
+    """程序段: 刀路从抬刀平面下降到回到抬刀平面的完整循环"""
+    start_idx: int      # 起始移动索引 (含)
+    end_idx: int        # 结束移动索引 (含)
+    start_line: int     # 起始行号
+    end_line: int       # 结束行号
+    z_min: float        # 段内 Z 最低值
+
+
+def compute_lift_plane(moves) -> float:
+    """抬刀平面自动检测: 移动端点 Z 出现次数 >=2 的最高档位。
+
+    程序多次回程到抬刀平面, 该 Z 档位出现多次; 排除只出现一次的
+    偶发高 Z (如手动对刀); 全部只出现一次时回退最大值。
+    """
+    counts = {}
+    for m in moves:
+        z = round(m.end[2], 1)
+        counts[z] = counts.get(z, 0) + 1
+    if not counts:
+        return 0.0
+    repeated = [z for z, c in counts.items() if c >= 2]
+    if repeated:
+        return max(repeated)
+    return max(counts)
+
+
+def compute_segments(moves, lift=None):
+    """把移动序列分段: 从抬刀平面下降 -> 段开始, 回到抬刀平面 -> 段结束。
+
+    lift 为 None 时用 compute_lift_plane 自动检测; 传入则用用户覆盖值。
+    全部移动在平面下方 -> 1 段; 无移动 -> 空列表。
+    """
+    if not moves:
+        return []
+    if lift is None:
+        lift = compute_lift_plane(moves)
+    zs = [m.end[2] for m in moves]
+    tol = max(0.5, (max(zs) - min(zs)) * 0.01)
+    segs = []
+    start = None
+    z_min = None
+    for i, m in enumerate(moves):
+        at_lift = m.end[2] >= lift - tol
+        if start is None:
+            if not at_lift:
+                start = i
+                z_min = m.end[2]
+        else:
+            if m.end[2] < z_min:
+                z_min = m.end[2]
+            if at_lift:
+                segs.append(Segment(start, i, moves[start].line_number,
+                                    m.line_number, z_min))
+                start = None
+    if start is not None:
+        segs.append(Segment(start, len(moves) - 1, moves[start].line_number,
+                            moves[-1].line_number, z_min))
+    return segs
+
+
+@dataclass
 class ProgramStats:
     """程序统计 (供侧栏面板与详情页展示)"""
     x_min: float

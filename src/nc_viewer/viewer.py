@@ -17,6 +17,7 @@ from __future__ import annotations
 import bisect
 import math
 import os
+import re
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
@@ -26,7 +27,8 @@ from . import theme
 from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
-from .parser import compute_stats, parse_nc
+from .parser import (compute_lift_plane, compute_segments, compute_stats,
+                     parse_nc)
 from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_full_profile,
                    tool_overall_height, tool_profile_points, tool_summary)
 
@@ -60,6 +62,21 @@ def _compute_lead_skip(moves):
         else:
             break
     return n
+
+
+def _mpf_program_name(text):
+    """MPF 头部程序名: 头部文本中括号内的标识符 (部分系统格式)"""
+    m = re.search(r"\(([A-Za-z0-9_\-]{2,})\)", text[:2000])
+    return m.group(1) if m else None
+
+
+def _apt_program_name(text):
+    """apt 程序名: PPRINT PROGNAME 行, 或首个 $$ 注释行"""
+    m = re.search(r"PPRINT\s+PROGNAME\s+(\S+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"^\$\$\s*(\S+)", text, re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def _enable_dpi_awareness():
@@ -108,9 +125,10 @@ class NCViewer(tk.Tk):
         self.current_line = None
         self._disp3d = None            # 预计算的刀路 3D 离散点缓存
 
-        # 多文件管理: path -> 解析/缓存数据; fs_paths 为文件栏显示顺序
+        # 多文件管理: path -> 解析/缓存数据; mp_paths/apt_paths 为双区显示顺序
         self.file_items = {}
-        self.fs_paths = []
+        self.mp_paths = []
+        self.apt_paths = []
 
         # 搜索状态
         self._search_pattern = None
@@ -135,6 +153,14 @@ class NCViewer(tk.Tk):
         self.custom_tool = None
         self._parsed_tool = None
         self.show_tool = tk.BooleanVar(value=True)
+
+        # 分段: 抬刀平面(可用户覆盖) + 段列表 + 段模式
+        self._segments = []
+        self._lift_plane = 0.0
+        self._lift_auto = True
+        self._seg_index = None
+        self._seg_filter = None            # (start_idx, end_idx) | None
+        self._seg_only = tk.BooleanVar(value=False)
 
         self._build_ui()
         self._bind_canvas()
@@ -178,6 +204,9 @@ class NCViewer(tk.Tk):
         fs_frame.columnconfigure(0, weight=1)
         ttk.Label(fs_frame, text="文件列表", font=("", 10, "bold"),
                   style="Panel.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        # 上区: 数控程序 (MPF)
+        ttk.Label(fs_frame, text="数控程序 (MPF)", font=("", 9, "bold"),
+                  style="Panel.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.file_listbox = tk.Listbox(fs_frame, width=34, exportselection=False,
                                        activestyle="dotbox",
                                        selectmode="browse", relief="flat", highlightthickness=1,
@@ -186,12 +215,29 @@ class NCViewer(tk.Tk):
                                        selectforeground="#ffffff",
                                        highlightbackground=theme.BORDER_LIGHT,
                                        highlightcolor=theme.ACCENT)
-        self.file_listbox.grid(row=1, column=0, sticky="nsew")
+        self.file_listbox.grid(row=2, column=0, sticky="nsew")
         fsb = ttk.Scrollbar(fs_frame, orient="vertical", command=self.file_listbox.yview)
-        fsb.grid(row=1, column=1, sticky="ns")
+        fsb.grid(row=2, column=1, sticky="ns")
         self.file_listbox.config(yscrollcommand=fsb.set)
-        fs_frame.rowconfigure(1, weight=1)
         self.file_listbox.bind("<<ListboxSelect>>", self._on_file_select)
+        # 下区: APT 源文件 (仅刀具信息)
+        ttk.Label(fs_frame, text="APT 源文件 (刀具)", font=("", 9, "bold"),
+                  style="Panel.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.apt_listbox = tk.Listbox(fs_frame, width=34, exportselection=False,
+                                      activestyle="dotbox",
+                                      selectmode="browse", relief="flat", highlightthickness=1,
+                                      bg=theme.PANEL, fg=theme.TEXT,
+                                      selectbackground=theme.SELECTION,
+                                      selectforeground="#ffffff",
+                                      highlightbackground=theme.BORDER_LIGHT,
+                                      highlightcolor=theme.ACCENT, height=5)
+        self.apt_listbox.grid(row=4, column=0, sticky="nsew")
+        asb = ttk.Scrollbar(fs_frame, orient="vertical", command=self.apt_listbox.yview)
+        asb.grid(row=4, column=1, sticky="ns")
+        self.apt_listbox.config(yscrollcommand=asb.set)
+        self.apt_listbox.bind("<<ListboxSelect>>", self._on_apt_select)
+        fs_frame.rowconfigure(2, weight=3)
+        fs_frame.rowconfigure(4, weight=1)
 
         # 画布
         cv_frame = ttk.Frame(upper)
@@ -288,7 +334,7 @@ class NCViewer(tk.Tk):
         posf.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
-        for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行")):
+        for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
             ttk.Label(posf, text=key, style="Panel.TLabel",
                       font=("", 10, "bold")).grid(row=r, column=0, sticky="w")
             ent = tk.Entry(posf, width=10, state="readonly",
@@ -301,14 +347,14 @@ class NCViewer(tk.Tk):
             self.pos_fields[key] = ent
         # 本行: 原始代码行文本 (横跨两列)
         ttk.Label(posf, text="本行", style="Panel.TLabel",
-                  font=("", 10, "bold")).grid(row=7, column=0, sticky="w")
+                  font=("", 10, "bold")).grid(row=8, column=0, sticky="w")
         self.pos_fields["本行"] = tk.Entry(posf, width=30, state="readonly",
                                           readonlybackground=theme.INPUT_BG,
                                           fg=theme.TEXT, font=theme.FONT_MONO,
                                           relief="solid", bd=1, highlightthickness=1,
                                           highlightbackground=theme.BORDER_LIGHT,
                                           highlightcolor=theme.ACCENT)
-        self.pos_fields["本行"].grid(row=7, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
+        self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
         # 刀具栏 (滚动区第 4 节, 固定大小)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -348,9 +394,12 @@ class NCViewer(tk.Tk):
                             highlightcolor=theme.ACCENT)
         xsb.config(command=self.code.xview)
         ysb.config(command=self.code.yview)
-        self.code.pack(side="left", fill="both", expand=True)
-        ysb.pack(side="right", fill="y")
-        xsb.pack(side="bottom", fill="x")
+        # grid 布局: 横向滚动条铺满代码区宽度 (pack 会被挤到左下角)
+        cvsb.rowconfigure(0, weight=1)
+        cvsb.columnconfigure(0, weight=1)
+        self.code.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
         self.code.configure(state="disabled")
         self.code.bind("<Button-1>", self._on_code_click, add="+")
         self.code.tag_configure("cur", background="#264f78", foreground="#ffffff")
@@ -393,6 +442,36 @@ class NCViewer(tk.Tk):
         ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(
             row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        # 按段浏览 (搜索定位下方): 抬刀平面编辑 + 段导航 + 段模式
+        segf = ttk.LabelFrame(right, text="按段浏览", padding=8, style="Panel.TLabelframe")
+        segf.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        segf.columnconfigure(1, weight=1)
+        ttk.Label(segf, text="抬刀平面 Z:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.lift_entry = ttk.Entry(segf, width=8)
+        self.lift_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(segf, text="应用", command=self._apply_lift).grid(row=0, column=2)
+        ttk.Button(segf, text="自动", command=self._auto_lift).grid(row=0, column=3, padx=(4, 0))
+        nav = ttk.Frame(segf, style="Panel.TFrame")
+        nav.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Button(nav, text="◀ 上一段",
+                   command=lambda: self._step_segment(-1)).pack(side="left")
+        self.seg_lbl = ttk.Label(nav, text="段 -/-", style="Panel.TLabel")
+        self.seg_lbl.pack(side="left", padx=6)
+        ttk.Button(nav, text="下一段 ▶",
+                   command=lambda: self._step_segment(1)).pack(side="left")
+        ttk.Label(segf, text="段号:", style="Panel.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(6, 0))
+        self.seg_entry = ttk.Entry(segf, width=6)
+        self.seg_entry.grid(row=2, column=1, sticky="ew", padx=4, pady=(6, 0))
+        self.seg_entry.bind("<Return>", lambda e: self._jump_segment())
+        ttk.Button(segf, text="跳转", command=self._jump_segment).grid(
+            row=2, column=2, pady=(6, 0))
+        self.seg_info = ttk.Label(segf, text="", style="Panel.TLabel", font=theme.FONT_SMALL)
+        self.seg_info.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(segf, text="仅显示当前段", variable=self._seg_only,
+                        command=self._toggle_seg_only).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
         self.canvas.bind("<B1-Motion>", self._pan_move)
@@ -417,7 +496,8 @@ class NCViewer(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="选择 NC 文件(可多选)",
             initialdir=initdir,
-            filetypes=[("NC/G代码", "*.MPF *.NC *.CNC *.TXT *.mpf *.nc *.cnc *.txt"), ("所有文件", "*.*")],
+            filetypes=[("NC/G代码", "*.MPF *.NC *.CNC *.TXT *.aptsource *.apt *.mpf *.nc *.cnc *.txt *.Aptsource"),
+                       ("所有文件", "*.*")],
         )
         if paths:
             self.add_files(paths)
@@ -461,7 +541,16 @@ class NCViewer(tk.Tk):
         if not new_paths:
             return
         self._refresh_file_list()
-        self.set_current_file(new_paths[0])
+        # 默认加载第一个数控程序; 仅导入 apt 时只更新刀具信息
+        first_mpf = next((p for p in new_paths
+                          if not p.lower().endswith((".aptsource", ".apt"))), None)
+        if first_mpf:
+            self.set_current_file(first_mpf)
+        else:
+            item = self.file_items[new_paths[0]]
+            self.tool = (self.custom_tool if self.custom_tool is not None
+                         else item["tool"])
+            self._refresh_tool_ui()
 
     @staticmethod
     def _parse_tool_for(path, text):
@@ -481,18 +570,85 @@ class NCViewer(tk.Tk):
         return None
 
     def _refresh_file_list(self):
-        self.fs_paths = list(self.file_items.keys())
+        """重建双区文件列表 (上: 数控程序, 下: APT) 并更新关联"""
+        mp = [p for p in self.file_items
+              if not p.lower().endswith((".aptsource", ".apt"))]
+        ap = [p for p in self.file_items
+              if p.lower().endswith((".aptsource", ".apt"))]
+        self.mp_paths = mp
+        self.apt_paths = ap
         self.file_listbox.delete(0, "end")
-        for p in self.fs_paths:
+        for p in mp:
             self.file_listbox.insert("end", os.path.basename(p))
+        self.apt_listbox.delete(0, "end")
+        for p in ap:
+            self.apt_listbox.insert("end", os.path.basename(p))
+        self._associate_files()
 
     def _on_file_select(self, e):
         sel = self.file_listbox.curselection()
         if not sel:
             return
         idx = sel[0]
-        if 0 <= idx < len(self.fs_paths):
-            self.set_current_file(self.fs_paths[idx])
+        if 0 <= idx < len(self.mp_paths):
+            path = self.mp_paths[idx]
+            self.set_current_file(path)
+            # 高亮关联 APT
+            self._highlight_partner(self.apt_listbox, self.apt_paths,
+                                    self.file_items[path].get("partner"))
+
+    def _on_apt_select(self, e):
+        """点击 APT: 仅更新刀具信息 (不切换主视图) + 高亮关联 MPF"""
+        sel = self.apt_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if 0 <= idx < len(self.apt_paths):
+            path = self.apt_paths[idx]
+            item = self.file_items[path]
+            self.tool = (self.custom_tool if self.custom_tool is not None
+                         else item["tool"])
+            self._refresh_tool_ui()
+            self._highlight_partner(self.file_listbox, self.mp_paths,
+                                    item.get("partner"))
+
+    @staticmethod
+    def _highlight_partner(box, paths, partner):
+        """在另一列表中高亮关联文件"""
+        box.selection_clear(0, "end")
+        if partner and partner in paths:
+            idx = paths.index(partner)
+            box.selection_set(idx)
+            box.see(idx)
+
+    def _associate_files(self):
+        """按文件名/程序名建立 mpf<->apt 关联 (双向写入 partner)"""
+        for item in self.file_items.values():
+            item["partner"] = None
+        mpf_names = {}        # 规范化名/程序名 -> path
+        for p in self.mp_paths:
+            item = self.file_items[p]
+            stem = os.path.splitext(os.path.basename(p))[0].lower()
+            mpf_names[stem] = p
+            prog = _mpf_program_name(item["text"])
+            if prog:
+                mpf_names.setdefault(prog.lower(), p)
+        for p in self.apt_paths:
+            item = self.file_items[p]
+            stem = os.path.splitext(os.path.basename(p))[0].lower()
+            cand = stem[:-2] if stem.endswith("_i") else stem     # 去 _I 后缀
+            partner = mpf_names.get(cand)
+            if partner is None:
+                prog = _apt_program_name(item["text"])
+                if prog:
+                    pl = prog.lower()
+                    for stem2, p2 in mpf_names.items():           # 程序名互为子串
+                        if pl in stem2 or stem2 in pl:
+                            partner = p2
+                            break
+            if partner:
+                item["partner"] = partner
+                self.file_items[partner]["partner"] = p
 
     def set_current_file(self, path):
         """把某个已加载文件的状态恢复到主视图"""
@@ -526,14 +682,20 @@ class NCViewer(tk.Tk):
         self._fill_legend()
         self._fill_stats()
         self._refresh_tool_ui()
+        self._recompute_segments()
         self.fit_view()
         self.status.config(text=self._status_text())
         # 高亮文件栏当前项
         self.file_listbox.selection_clear(0, "end")
-        if path in self.fs_paths:
-            idx = self.fs_paths.index(path)
+        self.apt_listbox.selection_clear(0, "end")
+        if path in self.mp_paths:
+            idx = self.mp_paths.index(path)
             self.file_listbox.selection_set(idx)
             self.file_listbox.see(idx)
+        elif path in self.apt_paths:
+            idx = self.apt_paths.index(path)
+            self.apt_listbox.selection_set(idx)
+            self.apt_listbox.see(idx)
 
     def _status_text(self):
         r = self.result
@@ -1084,6 +1246,8 @@ class NCViewer(tk.Tk):
         a0 = b0 = float("inf")
         a1 = b1 = float("-inf")
         for i in range(self._lead_skip, len(self._disp3d)):
+            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+                continue
             for p in self._disp3d[i]:
                 a, b = project(p, q)
                 if a < a0: a0 = a
@@ -1155,6 +1319,8 @@ class NCViewer(tk.Tk):
         for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
             if i < self._lead_skip:      # 从原点出发的起始进给段不显示
                 continue
+            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+                continue                 # 段模式: 只显示当前段
             if m.motion == "G0" and not show_g0:
                 continue
             key = color_of_move(m, palette)
@@ -1426,6 +1592,8 @@ class NCViewer(tk.Tk):
                         f"{m.feed:g}" if m and m.feed is not None else "-")
         self._set_field(self.pos_fields["G"], m.motion if m else "-")
         self._set_field(self.pos_fields["行"], str(ln))
+        seg_no = self._segment_for_line(ln)
+        self._set_field(self.pos_fields["段"], str(seg_no) if seg_no else "-")
         line_text = self.lines[ln - 1] if 1 <= ln <= len(self.lines) else ""
         self._set_field(self.pos_fields["本行"], line_text)
 
@@ -1492,6 +1660,121 @@ class NCViewer(tk.Tk):
         self.code.tag_raise("target")
         self.target_lbl.config(text=f"目标行: {ln}")
 
+    # ------------- 分段 (按段浏览) -------------
+    def _recompute_segments(self):
+        """重算分段 (文件加载或抬刀平面修改时)"""
+        if not self.result:
+            self._segments = []
+            self._lift_plane = 0.0
+            self._seg_index = None
+        else:
+            lift = (compute_lift_plane(self.result.moves) if self._lift_auto
+                    else self._lift_plane)
+            self._lift_plane = lift
+            self._segments = compute_segments(self.result.moves, lift)
+            if self._segments and self._seg_index is None:
+                self._seg_index = 0
+            elif self._seg_index is not None and self._seg_index >= len(self._segments):
+                self._seg_index = len(self._segments) - 1 if self._segments else None
+        self._update_seg_ui()
+        self._apply_seg_filter()
+
+    def _seg_line_bounds(self):
+        """段模式下的行范围; 无段模式返回全局"""
+        if self._seg_filter is not None and self._seg_index is not None:
+            seg = self._segments[self._seg_index]
+            return seg.start_line, seg.end_line
+        return (1, len(self.lines)) if self.result else (1, 1)
+
+    def _segment_for_line(self, ln):
+        """当前行所属段号 (1 基), 无则 0"""
+        for i, s in enumerate(self._segments, 1):
+            if s.start_line <= ln <= s.end_line:
+                return i
+        return 0
+
+    def _update_seg_ui(self):
+        """刷新按段浏览面板"""
+        n = len(self._segments)
+        if n and self._seg_index is not None:
+            seg = self._segments[self._seg_index]
+            self.seg_lbl.config(text=f"段 {self._seg_index + 1}/{n}")
+            self.seg_info.config(
+                text=f"行 {seg.start_line}~{seg.end_line} · Z 最低 {seg.z_min:g}")
+        else:
+            self.seg_lbl.config(text="段 -/-")
+            self.seg_info.config(text="")
+        self.lift_entry.delete(0, "end")
+        self.lift_entry.insert(0, f"{self._lift_plane:g}")
+
+    def _apply_lift(self):
+        """用户修改抬刀平面并自动重算分段"""
+        if not self.result:
+            return
+        try:
+            lift = float(self.lift_entry.get())
+        except ValueError:
+            messagebox.showinfo("提示", "抬刀平面需为数值")
+            return
+        self._lift_auto = False
+        self._lift_plane = lift
+        self._recompute_segments()
+
+    def _auto_lift(self):
+        """恢复自动检测抬刀平面"""
+        self._lift_auto = True
+        self._recompute_segments()
+
+    def _apply_seg_filter(self):
+        """根据「仅显示当前段」设置渲染过滤"""
+        if (self._seg_only.get() and self._seg_index is not None
+                and self._segments):
+            seg = self._segments[self._seg_index]
+            self._seg_filter = (seg.start_idx, seg.end_idx)
+        else:
+            self._seg_filter = None
+        if self.result:
+            self._view_refresh()
+
+    def _toggle_seg_only(self):
+        self._stop_playback()
+        self._apply_seg_filter()
+        if self._seg_filter and self._seg_index is not None:
+            self._set_segment(self._seg_index)
+
+    def _set_segment(self, idx):
+        """跳转到指定段: 段模式进轨迹, 否则全量视图跳到段首"""
+        if not (0 <= idx < len(self._segments)):
+            return
+        self._seg_index = idx
+        self._apply_seg_filter()
+        seg = self._segments[idx]
+        self._stop_playback()
+        if self._seg_filter:
+            if not self._trace_active:
+                self._trace_begin()
+            self.current_line = seg.start_line - 1
+            self.set_current_line(seg.start_line, animate=True)
+        else:
+            self.set_current_line(seg.start_line)
+        self._update_seg_ui()
+
+    def _step_segment(self, delta):
+        if not self._segments:
+            return
+        cur = self._seg_index if self._seg_index is not None else 0
+        self._set_segment(max(0, min(len(self._segments) - 1, cur + delta)))
+
+    def _jump_segment(self):
+        if not self._segments:
+            return
+        try:
+            n = int(self.seg_entry.get())
+        except ValueError:
+            return
+        if 1 <= n <= len(self._segments):
+            self._set_segment(n - 1)
+
     # ------------- 逐行运行 (播放控制条) -------------
     def _stop_playback(self):
         """停止播放/演示 (幂等)"""
@@ -1530,25 +1813,27 @@ class NCViewer(tk.Tk):
     def _play_tick(self):
         if self._play_mode != "play":
             return
-        base = self.current_line if self.current_line else 0
-        if base >= len(self.lines):
+        lo, hi = self._seg_line_bounds()
+        base = self.current_line if self.current_line else lo - 1
+        if base >= hi:
             self._stop_playback()
             return
-        # 合并跳行: 一次推进 N 行 (轨迹同步合并绘制)
-        ln = min(base + self._batch_lines(), len(self.lines))
+        # 合并跳行: 一次推进 N 行 (段模式钳制在段内)
+        ln = min(base + self._batch_lines(), hi)
         self.set_current_line(ln, animate=True)
         self._play_job = self.after(self._play_speed_ms(), self._play_tick)
 
     def _step_line_ctl(self, delta):
-        """单步前进/后退 (轨迹演示模式)"""
+        """单步前进/后退 (轨迹演示模式, 段模式钳制在段内)"""
         if not self.result:
             return
         self._stop_playback()
         if not self._trace_active:
             self._trace_begin()
             self.current_line = 0
-        base = self.current_line if self.current_line else 0
-        ln = max(1, min(len(self.lines), base + delta))
+        lo, hi = self._seg_line_bounds()
+        base = self.current_line if self.current_line else lo - 1
+        ln = max(lo, min(hi, base + delta))
         self.set_current_line(ln, animate=True)
 
     def _reset_line(self):
@@ -1557,18 +1842,20 @@ class NCViewer(tk.Tk):
         self._stop_playback()
         if not self._trace_active:
             self._trace_begin()
-        self.current_line = 0
-        self.set_current_line(1, animate=True)
+        lo, _ = self._seg_line_bounds()
+        self.current_line = lo - 1
+        self.set_current_line(lo, animate=True)
 
     def _draw_all(self):
-        """一键绘制整条程序刀路 (轨迹模式直达结尾)"""
+        """一键绘制全部刀路 (段模式画完本段, 否则整条程序)"""
         if not self.result:
             return
         self._stop_playback()
         if not self._trace_active:
             self._trace_begin()
             self.current_line = 0
-        self.set_current_line(len(self.lines), animate=True)
+        _, hi = self._seg_line_bounds()
+        self.set_current_line(hi, animate=True)
 
     def _run_to_target(self, animated):
         """运行到选中目标行: animated=True 演示(动画逐帧画刀路),
@@ -1615,11 +1902,18 @@ class NCViewer(tk.Tk):
         self._play_job = self.after(self._play_speed_ms(), self._demo_tick)
 
     # ------------- 轨迹渐进绘制 (播放/演示时刀路逐行画出) -------------
+    def _trace_base(self):
+        """轨迹起始移动索引: 跳过前导进给段; 段模式下从段首开始"""
+        base = self._lead_skip
+        if self._seg_filter:
+            base = max(base, self._seg_filter[0])
+        return base
+
     def _trace_begin(self):
         """开始轨迹演示: 清空已绘刀路, 从第一个可解析点起按行绘制"""
         self.canvas.delete("path")
         self._trace_active = True
-        self._trace_drawn = self._lead_skip    # 跳过从原点出发的起始进给段
+        self._trace_drawn = self._trace_base()
         self._trace_items = []
         self._move_lines = [m.line_number for m in self.result.moves]
         self._draw_axes()
@@ -1635,7 +1929,7 @@ class NCViewer(tk.Tk):
         self.canvas.delete("axes", "path", "cur", "curseg", "toolmodel")
         self._draw_axes()
         self._trace_items = []
-        self._trace_drawn = self._lead_skip
+        self._trace_drawn = self._trace_base()
         self._trace_draw_to(drawn - 1)
         if self.current_line is not None:
             self._draw_current()
@@ -1647,13 +1941,15 @@ class NCViewer(tk.Tk):
             for _, item, _ in self._trace_items:
                 self.canvas.delete(item)
             self._trace_items = []
-            self._trace_drawn = self._lead_skip
+            self._trace_drawn = self._trace_base()
         moves = self.result.moves
         show_g0 = self.show_g0.get()
         w, x, y, z = self.quat
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
         for i in range(self._trace_drawn, k + 1):
             m = moves[i]
+            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+                continue
             if m.motion == "G0" and not show_g0:
                 continue
             color = color_of_move(m, self.palette)

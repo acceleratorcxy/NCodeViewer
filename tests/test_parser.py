@@ -4,7 +4,8 @@ import math
 
 import pytest
 
-from nc_viewer.parser import Move, compute_stats, parse_nc
+from nc_viewer.parser import (Move, compute_lift_plane, compute_segments,
+                              compute_stats, parse_nc)
 
 
 # ---------- 基础线性移动 ----------
@@ -304,3 +305,80 @@ def test_compute_stats_f_excludes_g0_rapid():
     assert (st.f_min, st.f_max) == (1000.0, 1000.0)
     assert st.cut_total == 1
     assert st.g_counts == {"G0": 2, "G1": 1}
+
+# ---------- 分段 (抬刀平面) ----------
+def test_lift_plane_is_most_repeated_high_z():
+    """抬刀平面 = 出现次数>=2 的最高 Z 档位"""
+    text = ("G01X0Y0Z100F1000\n"      # 抬刀平面 Z100 (多次)
+            "G01X10Z50F1000\n"
+            "G01X20Z-2F1000\n"
+            "G01X30Z50F1000\n"
+            "G01X40Z100F1000\n"
+            "G01X50Z-2F1000\n"
+            "G01X60Z100F1000\n")
+    r = parse_nc(text)
+    assert compute_lift_plane(r.moves) == 100.0
+
+
+def test_lift_plane_excludes_one_off_high_z():
+    """偶发高 Z (仅一次) 不作为抬刀平面"""
+    text = ("G01X0Y0Z100F1000\n"
+            "G01X10Z100F1000\n"
+            "G01X20Z200F1000\n"       # 偶发 Z200
+            "G01X30Z100F1000\n")
+    r = parse_nc(text)
+    assert compute_lift_plane(r.moves) == 100.0
+
+
+def test_lift_plane_falls_back_to_max_when_all_unique():
+    """全部 Z 仅出现一次时回退最大值"""
+    r = parse_nc("G01X0Z10F1000\nG01X10Z20F1000\nG01X20Z30F1000\n")
+    assert compute_lift_plane(r.moves) == 30.0
+
+
+def test_segments_plunge_and_retract_cycles():
+    """段 = 下降进入 + 回到抬刀平面"""
+    text = ("G01X0Y0Z100F1000\n"      # 抬刀
+            "G01X10Z50F1000\n"        # 下降
+            "G01X20Z-2F1000\n"
+            "G01X30Z-2F1000\n"
+            "G01X40Z100F1000\n"       # 回升 -> 段 1 结束
+            "G01X50Z50F1000\n"        # 段 2 开始
+            "G01X60Z-5F1000\n"
+            "G01X70Z100F1000\n")      # 段 2 结束
+    r = parse_nc(text)
+    segs = compute_segments(r.moves)
+    assert len(segs) == 2
+    s1, s2 = segs
+    assert (s1.start_idx, s1.end_idx) == (1, 4)
+    assert s1.z_min == -2.0
+    assert (s2.start_idx, s2.end_idx) == (5, 7)
+    assert s2.z_min == -5.0
+    assert s1.start_line == 2 and s1.end_line == 5
+
+
+def test_segments_lift_override():
+    """用户覆盖抬刀平面后分段重算"""
+    text = ("G01X0Y0Z100F1000\n"
+            "G01X10Z50F1000\n"
+            "G01X20Z-2F1000\n"
+            "G01X30Z50F1000\n"
+            "G01X40Z100F1000\n")
+    r = parse_nc(text)
+    segs = compute_segments(r.moves, lift=50.0)
+    # 抬刀 50: 第2行(50)在平面, 第3行(-2)下降, 第4行回 50 -> 1 段
+    assert len(segs) == 1
+    assert (segs[0].start_idx, segs[0].end_idx) == (2, 3)
+
+
+def test_segments_all_below_lift_is_one_segment():
+    # 首行 Z10 恰在抬刀平面(唯一 Z, 回退最大值)上, 段从下降行开始
+    r = parse_nc("G01X0Y0Z10F1000\nG01X10Z-2F1000\n")
+    segs = compute_segments(r.moves)
+    assert len(segs) == 1
+    assert (segs[0].start_idx, segs[0].end_idx) == (1, 1)
+
+
+def test_segments_empty_program():
+    r = parse_nc("\nM08\n")
+    assert compute_segments(r.moves) == []

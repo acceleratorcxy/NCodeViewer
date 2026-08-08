@@ -57,6 +57,31 @@ def test_file_pane_has_no_open_file_button(app):
     assert _find(fs_frame, OPEN_TEXT) == []
 
 
+def test_file_list_dual_zones_and_association(app, tmp_path):
+    """文件列表双区 + mpf/apt 关联 + apt 点击仅更新刀具"""
+    mpf = tmp_path / "prog1.MPF"
+    mpf.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    apt = tmp_path / "prog1_I.aptsource"
+    apt.write_text("PPRINT PROGNAME PROG1\n"
+                   "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+                   "         0.000000, 30.000000\n", encoding="utf-8")
+    app.open_file(str(mpf))
+    app.add_files([str(apt)])
+    assert str(mpf) in app.mp_paths
+    assert str(apt) in app.apt_paths
+    assert app.file_items[str(apt)]["partner"] == str(mpf)
+    assert app.file_items[str(mpf)]["partner"] == str(apt)
+    # 点击 apt: 不切换主视图, 只更新刀具 + 高亮关联 MPF
+    before = app._current_path
+    idx = app.apt_paths.index(str(apt))
+    app.apt_listbox.selection_clear(0, "end")
+    app.apt_listbox.selection_set(idx)
+    app._on_apt_select(None)
+    assert app._current_path == before
+    assert app.tool is not None and app.tool.kind == "ball"
+    assert app.file_listbox.curselection() == (app.mp_paths.index(str(mpf)),)
+
+
 def test_file_listbox_wide_enough(app):
     """文件列表应足够宽以容纳长文件名(字符宽度>=30)"""
     assert int(app.file_listbox["width"]) >= 30
@@ -265,6 +290,63 @@ def test_sidebar_sections_scroll_together(app):
     assert rows == sorted(rows), "侧栏各节顺序应为 图例<统计<位置<刀具"
 
 
+def test_segment_fields_and_navigation(app, tmp_path):
+    """按段浏览: 段字段、抬刀平面修改重算、段导航"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X0Y0Z100F1000\n"
+                 "G01X10Z50F1000\nG01X20Z-2F1000\nG01X30Z100F1000\n"
+                 "G01X40Z50F1000\nG01X50Z-5F1000\nG01X60Z100F1000\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    assert len(app._segments) == 2
+    app.set_current_line(2)
+    assert app.pos_fields["段"].get() == "1"
+    app.set_current_line(5)
+    assert app.pos_fields["段"].get() == "2"
+    # 修改抬刀平面 -> 重算 (抬刀 50 时 -2 与 -5 两次下降 -> 2 段)
+    app.lift_entry.delete(0, "end")
+    app.lift_entry.insert(0, "50")
+    app._apply_lift()
+    assert not app._lift_auto
+    assert len(app._segments) == 2
+    # 恢复自动
+    app._auto_lift()
+    assert app._lift_auto
+    assert len(app._segments) == 2
+
+
+def test_segment_mode_renders_only_current_segment(app, tmp_path):
+    """仅显示当前段: 渲染过滤 + 播放钳制在段内"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X0Y0Z100F1000\n"
+                 "G01X10Z50F1000\nG01X20Z-2F1000\nG01X30Z100F1000\n"
+                 "G01X40Z50F1000\nG01X50Z-5F1000\nG01X60Z100F1000\n",
+                 encoding="utf-8")
+    app._lift_auto = True                     # 共享 fixture: 重置抬刀状态
+    app.open_file(str(p))
+    app._seg_only.set(True)
+    app._toggle_seg_only()
+    assert app._seg_filter is not None
+    app._draw_all()
+    assert app.current_line == 4              # 段1 末行
+    # 播放钳制在段内
+    app._play_mode = "play"
+    app.current_line = 3
+    app._play_tick()
+    assert app.current_line == 4
+    app._play_tick()
+    assert app._play_mode is None             # 到段尾停止
+    # 复位到段首
+    app._reset_line()
+    assert app.current_line == 2
+    # 关闭段模式恢复全局
+    app._seg_only.set(False)
+    app._toggle_seg_only()
+    assert app._seg_filter is None
+    app._draw_all()
+    assert app.current_line == 7
+
+
 def test_position_fields_boxed_values(app, tmp_path):
     """当前位置: 只读框展示 X/Y/Z/S/F/G/行/本行"""
     p = tmp_path / "t.nc"
@@ -355,6 +437,30 @@ def test_lead_skip_zero_for_non_origin_start(app, tmp_path):
     p.write_text("X10Y20\nG01X20Y30F100\n", encoding="utf-8")
     app.open_file(str(p))
     assert app._lead_skip == 0
+
+
+def test_horizontal_scrollbar_spans_code_width(app, tmp_path):
+    """NC 代码横向滚动条铺满代码区宽度 (grid 布局)"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.update_idletasks()
+    # 找到横向滚动条: 父容器与代码相同
+    for w in app.code.master.winfo_children():
+        if w.winfo_class() == "TScrollbar" and str(w.cget("orient")) == "horizontal":
+            xsb = w
+            break
+    else:
+        pytest.fail("未找到横向滚动条")
+    cvsb = app.code.master
+    assert abs(xsb.winfo_width() - (cvsb.winfo_width() - ysb_width(cvsb))) < 8
+
+
+def ysb_width(cvsb):
+    for w in cvsb.winfo_children():
+        if w.winfo_class() == "TScrollbar" and str(w.cget("orient")) == "vertical":
+            return w.winfo_width()
+    return 0
 
 
 def test_playback_controls_present(app):
