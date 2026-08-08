@@ -291,7 +291,7 @@ class NCViewer(tk.Tk):
                       font=("", 10, "bold")).grid(row=r, column=0, sticky="w")
             ent = tk.Entry(posf, width=10, state="readonly",
                            readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
-                           font=theme.FONT_MONO_LG, justify="right",
+                           font=theme.FONT_MONO_LG, justify="left",
                            relief="solid", bd=1, highlightthickness=1,
                            highlightbackground=theme.BORDER_LIGHT,
                            highlightcolor=theme.ACCENT)
