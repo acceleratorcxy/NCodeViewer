@@ -513,11 +513,11 @@ class NCViewer(tk.Tk):
         self._rot_data = None
 
     def _raise_bottom_bar(self):
-        """默认抬高底部大栏 (NC 代码+定位/搜索+段控制), 底部约占 35%"""
+        """默认抬高底部大栏 (NC 代码+定位/搜索+段控制), 底部约占 45%"""
         try:
             h = self.body_pane.winfo_height()
             if h > 300:
-                self.body_pane.sashpos(0, int(h * 0.65))
+                self.body_pane.sashpos(0, int(h * 0.55))
         except tk.TclError:
             pass
 
