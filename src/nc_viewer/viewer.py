@@ -41,9 +41,30 @@ def _sample_dir():
     return os.path.expanduser("~")
 
 
+def _enable_dpi_awareness():
+    """开启进程 DPI 感知, 修复高分屏缩放下 Tk 文字模糊。
+
+    Tk 8.6.9 自身非 DPI 感知, Windows 会整体位图放大导致文字发虚;
+    开启后 Tk 按真实 DPI 渲染, 文字清晰。Win8.1+ 优先逐显示器感知,
+    Win7 回退系统级感知。失败静默 (无显示环境/CI)。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # PER_MONITOR_DPI_AWARE
+            return
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()        # Win7: 系统 DPI 感知
+    except Exception:
+        pass
+
+
 # ---------- 主窗口 ----------
 class NCViewer(tk.Tk):
     def __init__(self):
+        _enable_dpi_awareness()
         super().__init__()
         theme.apply_theme(self)
         self.configure(bg=theme.BG)
@@ -136,20 +157,36 @@ class NCViewer(tk.Tk):
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
 
-        # 侧栏: 图例 + 定位 (面板样式, 与画布区分)
+        # 侧栏: 图例 + 统计 + 定位 (可滚动容器, 窗口缩小时内容完整可见)
         side = ttk.Frame(upper, width=260, padding=8, style="Panel.TFrame")
         upper.add(side, weight=0)
         side.columnconfigure(0, weight=1)
+        side.rowconfigure(0, weight=1)
+        self.side_canvas = tk.Canvas(side, bg=theme.PANEL, highlightthickness=0)
+        self.side_canvas.grid(row=0, column=0, sticky="nsew")
+        self.side_scroll = ttk.Scrollbar(side, orient="vertical",
+                                         command=self.side_canvas.yview)
+        self.side_scroll.grid(row=0, column=1, sticky="ns")
+        self.side_canvas.config(yscrollcommand=self.side_scroll.set)
+        inner = ttk.Frame(self.side_canvas, style="Panel.TFrame")
+        self._side_inner = inner
+        self._side_window = self.side_canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.columnconfigure(0, weight=1)
+        inner.bind("<Configure>", lambda e: self.side_canvas.configure(
+            scrollregion=self.side_canvas.bbox("all")))
+        self.side_canvas.bind("<Configure>",
+                              lambda e: self.side_canvas.itemconfigure(
+                                  self._side_window, width=e.width))
+        self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
+        inner.bind("<MouseWheel>", self._on_side_wheel)
 
-        ttk.Label(side, text="颜色图例", font=("", 10, "bold"),
+        ttk.Label(inner, text="颜色图例", font=("", 10, "bold"),
                   style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        self.legend = ttk.Frame(side, style="Panel.TFrame")
+        self.legend = ttk.Frame(inner, style="Panel.TFrame")
         self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
-        # 图例行可弹性伸缩但保底 1 行高度, 窗口缩小时图例不会被裁没
-        side.rowconfigure(1, weight=1, minsize=44)
 
         # 程序统计 (仅关键指标; 完整统计在「详情…」二级窗口)
-        st = ttk.LabelFrame(side, text="程序统计", padding=8, style="Panel.TLabelframe")
+        st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
         st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
@@ -166,8 +203,8 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        ttk.Separator(side, orient="horizontal").grid(row=3, column=0, sticky="ew")
-        loc = ttk.LabelFrame(side, text="按行定位", padding=8, style="Panel.TLabelframe")
+        ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
+        loc = ttk.LabelFrame(inner, text="按行定位", padding=8, style="Panel.TLabelframe")
         loc.grid(row=4, column=0, sticky="ew", pady=8)
         loc.columnconfigure(1, weight=1)
         ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
@@ -180,7 +217,7 @@ class NCViewer(tk.Tk):
         ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(row=2, column=1, pady=(6, 0), sticky="w")
 
         # 搜索定位
-        sr = ttk.LabelFrame(side, text="搜索定位", padding=8, style="Panel.TLabelframe")
+        sr = ttk.LabelFrame(inner, text="搜索定位", padding=8, style="Panel.TLabelframe")
         sr.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         sr.columnconfigure(1, weight=1)
         ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
@@ -191,7 +228,7 @@ class NCViewer(tk.Tk):
         ttk.Button(sr, text="下一个", command=lambda: self.search_nc(next_=True)).grid(row=1, column=1, sticky="w", pady=(6, 0))
         ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        self.pos_lbl = ttk.Label(side, text="当前位置: -", justify="left",
+        self.pos_lbl = ttk.Label(inner, text="当前位置: -", justify="left",
                                  font=theme.FONT_MONO, style="Panel.TLabel")
         self.pos_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
 
@@ -236,6 +273,10 @@ class NCViewer(tk.Tk):
         self.canvas.bind("<Configure>", lambda e: self.render() if self.result else None)
         self._pan_data = None
         self._rot_data = None
+
+    def _on_side_wheel(self, e):
+        """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
+        self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
 
     # ------------- 文件 -------------
     def open_file_multi(self):
@@ -455,7 +496,7 @@ class NCViewer(tk.Tk):
         return [(m.line_number, m.feed) for m in self.result.moves if m.feed is not None]
 
     def show_f_curve(self):
-        """二级窗口: F 进给随行号变化趋势 (按 F 档位着色)"""
+        """二级窗口: F 进给随行号变化趋势 (按 F 档位着色, 可拉伸)"""
         if not self.result:
             return
         data = self._f_curve_data()
@@ -465,14 +506,29 @@ class NCViewer(tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"F 进给趋势 — {os.path.basename(self._current_path)}")
         win.configure(bg=theme.BG)
-        win.resizable(False, False)
-        W, H = 720, 430
-        cv = tk.Canvas(win, bg=theme.EDITOR_BG, highlightthickness=0, width=W, height=H)
-        cv.pack(padx=8, pady=(8, 0))
-        win.update_idletasks()
+        win.geometry("820x460")
+        win.minsize(480, 320)
+        cv = tk.Canvas(win, bg=theme.EDITOR_BG, highlightthickness=0)
+        cv.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        self._curve_job = None
+        cv.bind("<Configure>", lambda e: self._curve_redraw(cv, data, e))
+        self._draw_f_curve(cv, data, cv.winfo_width() or 804, cv.winfo_height() or 420)
 
+    def _curve_redraw(self, cv, data, e):
+        """窗口拉伸时 60ms 防抖重绘"""
+        if self._curve_job is not None:
+            self.after_cancel(self._curve_job)
+        self._curve_job = self.after(60, lambda: self._draw_f_curve(cv, data, e.width, e.height))
+
+    def _draw_f_curve(self, cv, data, W, H):
+        """按给定尺寸绘制 F 趋势图 (可独立于窗口尺寸测试/重绘)"""
+        cv.delete("all")
+        if not data:
+            return
         pad_l, pad_r, pad_t, pad_b = 52, 20, 30, 38
         plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
+        if plot_w <= 20 or plot_h <= 20:
+            return
         lines = [ln for ln, _ in data]
         feeds = [f for _, f in data]
         fmin, fmax = min(feeds), max(feeds)
@@ -529,10 +585,11 @@ class NCViewer(tk.Tk):
             else:
                 cv.create_oval(pts[0] - 3, pts[1] - 3, pts[0] + 3, pts[1] + 3,
                                fill=color, outline="", tags="curve")
-        # 档位图例 (右下角)
+        # 档位图例 (右上角, 不压数据区)
+        feeds_order = self.result.feeds if self.result else []
         ly = pad_t + 10
-        for f in self.result.feeds:
-            col = palette[f]
+        for f in feeds_order:
+            col = palette.get(f, "#ffffff")
             cv.create_rectangle(W - pad_r - 140, ly, W - pad_r - 128, ly + 10,
                                 fill=col, outline="")
             cv.create_text(W - pad_r - 124, ly + 5,
@@ -926,6 +983,7 @@ class NCViewer(tk.Tk):
 
 
 def main():
+    _enable_dpi_awareness()
     app = NCViewer()
     # 命令行可直接传文件路径
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):

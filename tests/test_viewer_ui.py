@@ -125,3 +125,27 @@ def test_legend_chips_present_after_load(app, tmp_path):
     p.write_text("G01X10F1000\nX20F2000\n", encoding="utf-8")
     app.open_file(str(p))
     assert len(app.legend.winfo_children()) >= 4
+
+
+# ---------- 缩放健壮性 / DPI / F 曲线拉伸 ----------
+def test_sidebar_scrollable_container(app):
+    """侧栏为可滚动容器 (Canvas + 内嵌 Frame + 滚动条)"""
+    assert app.side_canvas.winfo_exists()
+    assert app.side_scroll.winfo_exists()
+    assert app._side_inner.winfo_exists()
+    assert app.side_canvas["yscrollcommand"] != ""
+
+
+def test_draw_f_curve_any_size(app):
+    """F 曲线绘制函数可按任意尺寸运行"""
+    cv = tk.Canvas(app, width=600, height=400)
+    app._draw_f_curve(cv, [(1, 1000.0), (2, 2000.0), (3, 1000.0)], 600, 400)
+    assert len(cv.find_all()) > 0
+    cv.destroy()
+
+
+def test_enable_dpi_awareness_idempotent():
+    """DPI 感知开启幂等且不抛异常"""
+    from nc_viewer.viewer import _enable_dpi_awareness
+    _enable_dpi_awareness()
+    _enable_dpi_awareness()
