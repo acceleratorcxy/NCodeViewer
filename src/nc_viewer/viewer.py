@@ -326,10 +326,9 @@ class NCViewer(tk.Tk):
         self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
         inner.bind("<MouseWheel>", self._on_side_wheel)
 
-        # 程序统计 (单列, 值全宽显示; 三栏均分拉伸, 各有最低高度)
+        # 程序统计 (单列, 值全宽显示; 固定自然高度)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=0, column=0, sticky="nsew", pady=(0, 2))
-        inner.rowconfigure(0, weight=1, minsize=240)
+        st.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -347,10 +346,9 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示 (纵向单列)
+        # 当前位置: 只读框字段展示 (纵向单列, 固定自然高度)
         posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=1, column=0, sticky="nsew", pady=(0, 2))
-        inner.rowconfigure(1, weight=1, minsize=300)
+        posf.grid(row=1, column=0, sticky="ew", pady=(0, 2))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
         for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
@@ -376,7 +374,7 @@ class NCViewer(tk.Tk):
         self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(4, 0),
                                      pady=(2, 0))
 
-        # 刀具栏: 与统计/位置均分拉伸, 有最低高度
+        # 刀具栏: 固定自然高度之外的剩余空间全部给刀具 (最小 240)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
         tbar.grid(row=2, column=0, sticky="nsew")
         inner.rowconfigure(2, weight=1, minsize=240)
