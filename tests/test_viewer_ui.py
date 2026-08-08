@@ -240,12 +240,17 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
-def test_position_above_tool_pinned(app):
-    """程序统计/当前位置/刀具栏均固定在 side 容器 (滚动区只剩图例)"""
-    side = app.pos_fields["X"].master.master
-    assert side is app.tool_cv.master.master          # 位置与刀具同容器
-    assert side is app.stats_labels["x"].master.master   # 统计同容器
-    assert side is not app._side_inner
+def test_sidebar_sections_scroll_together(app):
+    """图例/统计/位置/刀具同在一个滚动容器, 顺序固定"""
+    inner = app._side_inner
+    assert app.stats_labels["x"].master.master is inner
+    assert app.pos_fields["X"].master.master is inner
+    assert app.tool_cv.master.master is inner
+    rows = [app.legend.grid_info()["row"],
+            app.stats_labels["x"].master.grid_info()["row"],
+            app.pos_fields["X"].master.grid_info()["row"],
+            app.tool_cv.master.grid_info()["row"]]
+    assert rows == sorted(rows), "侧栏各节顺序应为 图例<统计<位置<刀具"
 
 
 def test_position_fields_boxed_values(app, tmp_path):
