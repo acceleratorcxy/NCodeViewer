@@ -149,10 +149,23 @@ class ProgramStats:
     moves_total: int = 0
     cut_total: int = 0                  # 切削段数 (G1/G2/G3)
     f_seg_counts: dict = field(default_factory=dict)  # {feed: 段数}
+    f_levels: list = field(default_factory=list)   # 首次出现序去重 F 值
+    s_levels: list = field(default_factory=list)   # 首次出现序去重 S 值
 
 
-def compute_stats(result: ParseResult) -> ProgramStats:
-    """从 ParseResult 计算程序统计。
+def _in_move_range(i, move_range) -> bool:
+    """移动索引是否在统计范围内: None=全部, tuple=单区间, list=多区间"""
+    if move_range is None:
+        return True
+    if isinstance(move_range, tuple):
+        return move_range[0] <= i <= move_range[1]
+    if not move_range:
+        return False
+    return any(lo <= i <= hi for lo, hi in move_range)
+
+
+def compute_stats(result: ParseResult, move_range=None) -> ProgramStats:
+    """从 ParseResult 计算程序统计; move_range 可限定移动索引范围 (段内统计)。
 
     行程按刀路端点(不包含原点)计算, 避免 bbox 含原点导致行程虚高。
     """
@@ -166,8 +179,12 @@ def compute_stats(result: ParseResult) -> ProgramStats:
     f_seg_counts: dict = {}
     g_counts: dict = {}
     cut_total = 0
+    moves_total = 0
 
-    for m in result.moves:
+    for i, m in enumerate(result.moves):
+        if not _in_move_range(i, move_range):
+            continue
+        moves_total += 1
         for p in (m.start, m.end):
             x, y, z = p
             if x < x_min: x_min = x
@@ -190,17 +207,28 @@ def compute_stats(result: ParseResult) -> ProgramStats:
     s_min = min(s_values) if s_values else None
     s_max = max(s_values) if s_values else None
 
+    def _levels(vals):
+        seen = set()
+        out = []
+        for v in vals:
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
     return ProgramStats(
         x_min=x_min, x_max=x_max,
         y_min=y_min, y_max=y_max,
         z_min=z_min, z_max=z_max,
         s_min=s_min, s_max=s_max,
         f_min=f_min, f_max=f_max,
-        f_count=len(result.feeds),
+        f_count=len(result.feeds) if move_range is None else len(_levels(f_values)),
         g_counts=g_counts,
-        moves_total=len(result.moves),
+        moves_total=moves_total,
         cut_total=cut_total,
         f_seg_counts=f_seg_counts,
+        f_levels=_levels(f_values),
+        s_levels=_levels(s_values),
     )
 
 

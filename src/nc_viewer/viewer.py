@@ -161,8 +161,9 @@ class NCViewer(tk.Tk):
         self._lift_plane = 0.0
         self._lift_auto = True
         self._seg_index = None
-        self._seg_filter = None            # (start_idx, end_idx) | None
+        self._seg_filter = None            # [(start_idx, end_idx), ...] | [] | None
         self._seg_only = tk.BooleanVar(value=False)
+        self._seg_checked = set()          # 勾选段索引集合 (唯一真源)
 
         # 投影缓存: 四元数/过滤条件不变时缩放只做坐标变换 (提速缩放)
         self._proj_cache = None
@@ -466,7 +467,7 @@ class NCViewer(tk.Tk):
             row=2, column=2, pady=(6, 0))
         self.seg_info = ttk.Label(segf, text="", style="Panel.TLabel", font=theme.FONT_SMALL)
         self.seg_info.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(segf, text="仅显示当前段", variable=self._seg_only,
+        ttk.Checkbutton(segf, text="仅显示勾选段", variable=self._seg_only,
                         command=self._toggle_seg_only).grid(
             row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Label(segf, text="所有段 (点击跳转):", style="Panel.TLabel").grid(
@@ -477,7 +478,7 @@ class NCViewer(tk.Tk):
         segbox.rowconfigure(0, weight=1)
         self.seg_listbox = tk.Listbox(segbox, width=24, exportselection=False,
                                       activestyle="dotbox",
-                                      selectmode="browse", relief="flat",
+                                      selectmode="multiple", relief="flat",
                                       highlightthickness=1,
                                       bg=theme.PANEL, fg=theme.TEXT,
                                       selectbackground=theme.SELECTION,
@@ -794,15 +795,15 @@ class NCViewer(tk.Tk):
 
     # ------------- 程序统计 -------------
     def _fill_stats(self):
-        """刷新侧栏关键统计 (行程/S/F/G 次数)"""
-        st = compute_stats(self.result)
+        """刷新侧栏关键统计 (S/F 显示具体值; 段模式为勾选段内统计)"""
+        st = compute_stats(self.result, move_range=self._seg_filter)
         fmt = lambda v: f"{v:.3f}"
         self.stats_labels["x"].config(text=f"{fmt(st.x_min)} ~ {fmt(st.x_max)}")
         self.stats_labels["y"].config(text=f"{fmt(st.y_min)} ~ {fmt(st.y_max)}")
         self.stats_labels["z"].config(text=f"{fmt(st.z_min)} ~ {fmt(st.z_max)}")
-        s_txt = "-" if st.s_min is None else f"{st.s_min:.0f} ~ {st.s_max:.0f}"
+        s_txt = "-" if not st.s_levels else " · ".join(f"{v:g}" for v in st.s_levels)
         self.stats_labels["s"].config(text=s_txt)
-        f_txt = "-" if st.f_min is None else f"{st.f_min:g} ~ {st.f_max:g} · {st.f_count} 档"
+        f_txt = "-" if not st.f_levels else " · ".join(f"{v:g}" for v in st.f_levels)
         self.stats_labels["f"].config(text=f_txt)
         g = st.g_counts
         g_txt = "  ".join(f"G{i}:{g.get(f'G{i}', 0)}" for i in (0, 1, 2, 3))
@@ -1288,7 +1289,7 @@ class NCViewer(tk.Tk):
         a0 = b0 = float("inf")
         a1 = b1 = float("-inf")
         for i in range(self._lead_skip, len(self._disp3d)):
-            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+            if self._move_filtered(i):
                 continue
             for p in self._disp3d[i]:
                 a, b = project(p, q)
@@ -1388,8 +1389,8 @@ class NCViewer(tk.Tk):
             for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
                 if i < self._lead_skip:      # 从原点出发的起始进给段不显示
                     continue
-                if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
-                    continue                 # 段模式: 只显示当前段
+                if self._move_filtered(i):   # 段模式: 只显示勾选段
+                    continue
                 if m.motion == "G0" and not show_g0:
                     continue
                 color = color_of_move(m, palette)
@@ -1770,11 +1771,30 @@ class NCViewer(tk.Tk):
         self._apply_seg_filter()
 
     def _seg_line_bounds(self):
-        """段模式下的行范围; 无段模式返回全局"""
-        if self._seg_filter is not None and self._seg_index is not None:
-            seg = self._segments[self._seg_index]
-            return seg.start_line, seg.end_line
+        """段模式下勾选段的并集行范围; 无段模式返回全局"""
+        if self._seg_filter is not None:
+            segs = [self._segments[i] for i in self._checked_segments()
+                    if i < len(self._segments)]
+            if segs:
+                return (min(s.start_line for s in segs),
+                        max(s.end_line for s in segs))
+            return (1, 1)          # 全不选: 空范围
         return (1, len(self.lines)) if self.result else (1, 1)
+
+    def _move_filtered(self, i):
+        """段模式过滤: 返回 True 表示应跳过该移动"""
+        if self._seg_filter is None:
+            return False
+        if not self._seg_filter:          # 空列表: 全部跳过
+            return True
+        return not any(lo <= i <= hi for lo, hi in self._seg_filter)
+
+    def _checked_segments(self):
+        """勾选的段索引列表 (排序)"""
+        return sorted(self._seg_checked)
+
+    def _sync_checked_from_listbox(self):
+        self._seg_checked = set(self.seg_listbox.curselection())
 
     def _segment_for_line(self, ln):
         """当前行所属段号 (1 基), 无则 0"""
@@ -1796,21 +1816,39 @@ class NCViewer(tk.Tk):
             self.seg_info.config(text="")
         self.lift_entry.delete(0, "end")
         self.lift_entry.insert(0, f"{self._lift_plane:g}")
-        # 所有段列表 (点击跳转)
-        self.seg_listbox.delete(0, "end")
-        for i, s in enumerate(self._segments, 1):
-            self.seg_listbox.insert(
-                "end", f"{i}: 行{s.start_line}~{s.end_line} Z{s.z_min:g}")
+        # 所有段列表 (多选勾选, 点击切换勾选; 重建时保留勾选状态)
+        self._refresh_seg_list_marks()
         if n and self._seg_index is not None:
-            self.seg_listbox.selection_clear(0, "end")
-            self.seg_listbox.selection_set(self._seg_index)
             self.seg_listbox.see(self._seg_index)
 
     def _on_seg_list_select(self, e):
-        sel = self.seg_listbox.curselection()
-        if not sel:
-            return
-        self._set_segment(sel[0])
+        """段列表点击: 勾选切换; 新勾选的段成为当前段; 段模式实时刷新"""
+        self._sync_checked_from_listbox()
+        self._refresh_seg_list_marks()
+        if self._seg_checked:
+            self._seg_index = min(self._seg_checked)
+        if self._seg_only.get():
+            self._stop_playback()
+            self._apply_seg_filter()
+            self._update_seg_ui()
+
+    def _set_checked(self, idx, on=True):
+        """设置段勾选状态"""
+        if on:
+            self._seg_checked.add(idx)
+        else:
+            self._seg_checked.discard(idx)
+        self._refresh_seg_list_marks()
+
+    def _refresh_seg_list_marks(self):
+        """按勾选状态重建段列表 [x]/[ ] 标记 (Listbox 无 text itemconfig)"""
+        self.seg_listbox.delete(0, "end")
+        for i, s in enumerate(self._segments):
+            mark = "[x]" if i in self._seg_checked else "[ ]"
+            self.seg_listbox.insert(
+                "end", f"{mark} {i + 1}: 行{s.start_line}~{s.end_line} Z{s.z_min:g}")
+        for i in self._seg_checked:
+            self.seg_listbox.selection_set(i)
 
     def _apply_lift(self):
         """用户修改抬刀平面并自动重算分段"""
@@ -1831,15 +1869,22 @@ class NCViewer(tk.Tk):
         self._recompute_segments()
 
     def _apply_seg_filter(self, refresh=True):
-        """根据「仅显示当前段」设置渲染过滤"""
-        if (self._seg_only.get() and self._seg_index is not None
-                and self._segments):
-            seg = self._segments[self._seg_index]
-            self._seg_filter = (seg.start_idx, seg.end_idx)
+        """根据「仅显示勾选段」设置渲染过滤 (勾选段并集; 全选=不过滤, 全不选=空)"""
+        if self._seg_only.get() and self._segments:
+            sel = self._checked_segments()
+            if not sel:
+                self._seg_filter = []             # 全不选: 不显示任何段
+            elif len(sel) == len(self._segments):
+                self._seg_filter = None           # 全选: 等同于全程序
+            else:
+                self._seg_filter = [(self._segments[i].start_idx,
+                                     self._segments[i].end_idx) for i in sel]
         else:
             self._seg_filter = None
-        if self.result and refresh:
-            self._view_refresh()
+        if self.result:
+            self._fill_stats()            # 段模式: 统计随勾选段刷新
+            if refresh:
+                self._view_refresh()
 
     def _toggle_seg_only(self):
         self._stop_playback()
@@ -1849,19 +1894,18 @@ class NCViewer(tk.Tk):
             self._apply_seg_filter()
 
     def _set_segment(self, idx):
-        """跳转到指定段: 段模式直接展示该段完整刀路 (从头播放先复位)"""
+        """跳转到指定段: 段模式确保勾选并直接展示勾选段完整刀路"""
         if not (0 <= idx < len(self._segments)):
             return
         self._seg_index = idx
-        self._apply_seg_filter(refresh=False)   # 由下方导航单次渲染
         seg = self._segments[idx]
         self._stop_playback()
-        if self._seg_filter:
-            # 直接画出当前段完整刀路, 标记在段末
-            if not self._trace_active:
-                self._trace_begin()
-            self.current_line = seg.start_line - 1
-            self.set_current_line(seg.end_line, animate=True)
+        if self._seg_only.get():
+            self._set_checked(idx, True)         # 导航段自动勾选
+        self._apply_seg_filter(refresh=False)    # 由下方渲染单次生效
+        if self._seg_filter is not None:
+            # 直接展示勾选段的完整刀路 (全量渲染, 切换段无残留)
+            self.set_current_line(seg.end_line)
         else:
             self.set_current_line(seg.start_line)
         self._update_seg_ui()
@@ -2010,10 +2054,13 @@ class NCViewer(tk.Tk):
 
     # ------------- 轨迹渐进绘制 (播放/演示时刀路逐行画出) -------------
     def _trace_base(self):
-        """轨迹起始移动索引: 跳过前导进给段; 段模式下从段首开始"""
+        """轨迹起始移动索引: 跳过前导进给段; 段模式下从勾选段最前开始"""
         base = self._lead_skip
         if self._seg_filter:
-            base = max(base, self._seg_filter[0])
+            if self._seg_filter:            # 非空: 勾选段并集起点
+                base = max(base, min(lo for lo, _ in self._seg_filter))
+            else:                           # 空: 无可画移动
+                base = len(self.result.moves)
         return base
 
     def _trace_begin(self):
@@ -2055,7 +2102,7 @@ class NCViewer(tk.Tk):
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
         for i in range(self._trace_drawn, k + 1):
             m = moves[i]
-            if self._seg_filter and not (self._seg_filter[0] <= i <= self._seg_filter[1]):
+            if self._move_filtered(i):
                 continue
             if m.motion == "G0" and not show_g0:
                 continue

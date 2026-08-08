@@ -133,7 +133,7 @@ def test_stats_panel_after_load(app, tmp_path):
     p.write_text(NC_SMALL, encoding="utf-8")
     app.open_file(str(p))
     assert app.stats_labels["x"]["text"] == "0.000 ~ 20.000"
-    assert app.stats_labels["f"]["text"] == "1000 ~ 2000 · 2 档"
+    assert app.stats_labels["f"]["text"] == "1000 · 2000"
     assert app.stats_labels["s"]["text"] == "-"
     assert "G0:1" in app.stats_labels["g"]["text"]
 
@@ -352,6 +352,49 @@ def test_segment_mode_renders_only_current_segment(app, tmp_path):
     assert app._seg_filter is None
     app._draw_all()
     assert app.current_line == 7
+
+
+def test_segment_multi_select_union_and_stats(app, tmp_path):
+    """多段勾选: 过滤为勾选段并集; S/F 显示具体值; 统计随段变化"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X0Y0Z100F1000S5000\n"
+                 "G01X10Z50F1000S5000\nG01X20Z-2F2000S8000\nG01X30Z100F2000S8000\n"
+                 "G01X40Z50F3000S5000\nG01X50Z-5F3000S8000\nG01X60Z100F3000S8000\n"
+                 "G01X70Z50F4000S5000\nG01X80Z-6F4000S8000\nG01X90Z100F4000S8000\n",
+                 encoding="utf-8")
+    app._lift_auto = True
+    app.open_file(str(p))
+    assert len(app._segments) == 3
+    # S/F 具体值显示 (全程序)
+    assert "5000" in app.stats_labels["s"]["text"]
+    assert "8000" in app.stats_labels["s"]["text"]
+    assert "1000" in app.stats_labels["f"]["text"]
+    assert "4000" in app.stats_labels["f"]["text"]
+    # 段模式: 勾选段1 -> 单范围过滤, 统计为段内 (F 无 3000/4000)
+    app._seg_only.set(True)
+    app.seg_listbox.selection_set(0)
+    app._toggle_seg_only()
+    assert app._seg_filter == [(1, 3)]
+    assert "2000" in app.stats_labels["f"]["text"]
+    assert "3000" not in app.stats_labels["f"]["text"]
+    # 追加勾选段2 -> 并集过滤
+    app.seg_listbox.selection_set(1)
+    app._on_seg_list_select(None)
+    assert app._seg_filter == [(1, 3), (4, 6)]
+    assert "3000" in app.stats_labels["f"]["text"]
+    assert "4000" not in app.stats_labels["f"]["text"]
+    # 全选 3 段 -> 等同于全程序 (不过滤)
+    app.seg_listbox.selection_set(2)
+    app._on_seg_list_select(None)
+    assert app._seg_filter is None
+    # 全不勾选 -> 空过滤 (不显示任何段)
+    app.seg_listbox.selection_clear(0, "end")
+    app._on_seg_list_select(None)
+    assert app._seg_filter == []
+    # 关闭段模式 -> 全局
+    app._seg_only.set(False)
+    app._toggle_seg_only()
+    assert app._seg_filter is None
 
 
 def test_position_fields_boxed_values(app, tmp_path):
