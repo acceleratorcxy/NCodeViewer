@@ -309,9 +309,9 @@ class NCViewer(tk.Tk):
         self.legend = ttk.Frame(inner, style="Panel.TFrame")
         self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
 
-        # 程序统计 (滚动区第 2 节, 固定大小)
-        st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        # 程序统计: 固定于侧栏底部 (默认加载后完整显示)
+        st = ttk.LabelFrame(side, text="程序统计", padding=8, style="Panel.TLabelframe")
+        st.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -329,9 +329,9 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示 (X/Y/Z/S/F/G/行/本行, 滚动区第 3 节)
-        posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        # 当前位置: 只读框字段展示, 固定于程序统计下方
+        posf = ttk.LabelFrame(side, text="当前位置", padding=8, style="Panel.TLabelframe")
+        posf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
         for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
@@ -356,9 +356,9 @@ class NCViewer(tk.Tk):
                                           highlightcolor=theme.ACCENT)
         self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
-        # 刀具栏 (滚动区第 4 节, 固定大小)
-        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=4, column=0, sticky="ew")
+        # 刀具栏: 贴住侧栏底部
+        tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
+        tbar.grid(row=3, column=0, columnspan=2, sticky="sew")
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
@@ -410,12 +410,14 @@ class NCViewer(tk.Tk):
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
 
-        # 右侧面板: 按行定位 + 搜索定位 (与上方侧栏同列对齐)
-        right = ttk.Frame(code_split, width=380, padding=8, style="Panel.TFrame")
+        # 右侧面板双列: 左 = 按行定位 + 搜索定位, 右 = 段控制
+        right = ttk.Frame(code_split, width=560, padding=8, style="Panel.TFrame")
         code_split.add(right, weight=0)
         right.columnconfigure(0, weight=1)
+        right.columnconfigure(1, weight=1)
+        right.rowconfigure(1, weight=1)
         loc = ttk.LabelFrame(right, text="按行定位", padding=8, style="Panel.TLabelframe")
-        loc.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        loc.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 8))
         loc.columnconfigure(1, weight=1)
         ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
         self.loc_entry = ttk.Entry(loc)
@@ -430,7 +432,7 @@ class NCViewer(tk.Tk):
             row=2, column=1, pady=(6, 0), sticky="w")
 
         sr = ttk.LabelFrame(right, text="搜索定位", padding=8, style="Panel.TLabelframe")
-        sr.grid(row=1, column=0, sticky="ew")
+        sr.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
         sr.columnconfigure(1, weight=1)
         ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
         self._search_entry = ttk.Entry(sr)
@@ -442,10 +444,11 @@ class NCViewer(tk.Tk):
         ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(
             row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        # 按段浏览 (搜索定位下方): 抬刀平面编辑 + 段导航 + 段模式
+        # 右列: 段控制 (抬刀平面/导航/段列表/段模式)
         segf = ttk.LabelFrame(right, text="按段浏览", padding=8, style="Panel.TLabelframe")
-        segf.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        segf.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(4, 0))
         segf.columnconfigure(1, weight=1)
+        segf.rowconfigure(5, weight=1)
         ttk.Label(segf, text="抬刀平面 Z:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.lift_entry = ttk.Entry(segf, width=8)
         self.lift_entry.grid(row=0, column=1, sticky="ew", padx=4)
@@ -471,6 +474,26 @@ class NCViewer(tk.Tk):
         ttk.Checkbutton(segf, text="仅显示当前段", variable=self._seg_only,
                         command=self._toggle_seg_only).grid(
             row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ttk.Label(segf, text="所有段 (点击跳转):", style="Panel.TLabel").grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        segbox = ttk.Frame(segf, style="Panel.TFrame")
+        segbox.grid(row=6, column=0, columnspan=4, sticky="nsew", pady=(2, 0))
+        segbox.columnconfigure(0, weight=1)
+        segbox.rowconfigure(0, weight=1)
+        self.seg_listbox = tk.Listbox(segbox, width=24, exportselection=False,
+                                      activestyle="dotbox",
+                                      selectmode="browse", relief="flat",
+                                      highlightthickness=1,
+                                      bg=theme.PANEL, fg=theme.TEXT,
+                                      selectbackground=theme.SELECTION,
+                                      selectforeground="#ffffff",
+                                      highlightbackground=theme.BORDER_LIGHT,
+                                      highlightcolor=theme.ACCENT)
+        self.seg_listbox.grid(row=0, column=0, sticky="nsew")
+        segsb = ttk.Scrollbar(segbox, orient="vertical", command=self.seg_listbox.yview)
+        segsb.grid(row=0, column=1, sticky="ns")
+        self.seg_listbox.config(yscrollcommand=segsb.set)
+        self.seg_listbox.bind("<<ListboxSelect>>", self._on_seg_list_select)
 
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
@@ -1694,7 +1717,7 @@ class NCViewer(tk.Tk):
         return 0
 
     def _update_seg_ui(self):
-        """刷新按段浏览面板"""
+        """刷新按段浏览面板 (含所有段列表)"""
         n = len(self._segments)
         if n and self._seg_index is not None:
             seg = self._segments[self._seg_index]
@@ -1706,6 +1729,21 @@ class NCViewer(tk.Tk):
             self.seg_info.config(text="")
         self.lift_entry.delete(0, "end")
         self.lift_entry.insert(0, f"{self._lift_plane:g}")
+        # 所有段列表 (点击跳转)
+        self.seg_listbox.delete(0, "end")
+        for i, s in enumerate(self._segments, 1):
+            self.seg_listbox.insert(
+                "end", f"{i}: 行{s.start_line}~{s.end_line} Z{s.z_min:g}")
+        if n and self._seg_index is not None:
+            self.seg_listbox.selection_clear(0, "end")
+            self.seg_listbox.selection_set(self._seg_index)
+            self.seg_listbox.see(self._seg_index)
+
+    def _on_seg_list_select(self, e):
+        sel = self.seg_listbox.curselection()
+        if not sel:
+            return
+        self._set_segment(sel[0])
 
     def _apply_lift(self):
         """用户修改抬刀平面并自动重算分段"""
@@ -1743,7 +1781,7 @@ class NCViewer(tk.Tk):
             self._set_segment(self._seg_index)
 
     def _set_segment(self, idx):
-        """跳转到指定段: 段模式进轨迹, 否则全量视图跳到段首"""
+        """跳转到指定段: 段模式直接展示该段完整刀路 (从头播放先复位)"""
         if not (0 <= idx < len(self._segments)):
             return
         self._seg_index = idx
@@ -1751,10 +1789,11 @@ class NCViewer(tk.Tk):
         seg = self._segments[idx]
         self._stop_playback()
         if self._seg_filter:
+            # 直接画出当前段完整刀路, 标记在段末
             if not self._trace_active:
                 self._trace_begin()
             self.current_line = seg.start_line - 1
-            self.set_current_line(seg.start_line, animate=True)
+            self.set_current_line(seg.end_line, animate=True)
         else:
             self.set_current_line(seg.start_line)
         self._update_seg_ui()

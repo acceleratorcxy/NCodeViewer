@@ -277,17 +277,14 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
-def test_sidebar_sections_scroll_together(app):
-    """图例/统计/位置/刀具四节同在一个滚动容器, 顺序固定"""
+def test_sidebar_bottom_three_pinned(app):
+    """程序统计/当前位置/刀具三区固定侧栏底部 (完整显示), 图例滚动"""
     inner = app._side_inner
-    assert app.stats_labels["x"].master.master is inner
-    assert app.pos_fields["X"].master.master is inner
-    assert app.tool_cv.master.master is inner
-    rows = [app.legend.grid_info()["row"],
-            app.stats_labels["x"].master.grid_info()["row"],
-            app.pos_fields["X"].master.grid_info()["row"],
-            app.tool_cv.master.grid_info()["row"]]
-    assert rows == sorted(rows), "侧栏各节顺序应为 图例<统计<位置<刀具"
+    assert app.legend.master is inner
+    side = app.stats_labels["x"].master.master
+    assert side is app.pos_fields["X"].master.master
+    assert side is app.tool_cv.master.master
+    assert side is not inner
 
 
 def test_segment_fields_and_navigation(app, tmp_path):
