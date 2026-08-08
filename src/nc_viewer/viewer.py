@@ -323,9 +323,8 @@ class NCViewer(tk.Tk):
         self.side_canvas.bind("<Configure>",
                               lambda e: self.side_canvas.itemconfigure(
                                   self._side_window, width=e.width, height=e.height))
-        self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
-        self.side_scroll.bind("<MouseWheel>", self._on_side_wheel)
-        inner.bind("<MouseWheel>", self._on_side_wheel)
+        # 滚轮: 全局捕获 + 指针位置判断 (子控件上滚动也能带动侧栏)
+        self.bind_all("<MouseWheel>", self._on_side_wheel_global)
 
         # 程序统计 (单列, 值全宽显示; 固定自然高度)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
@@ -531,9 +530,17 @@ class NCViewer(tk.Tk):
         self._pan_data = None
         self._rot_data = None
 
-    def _on_side_wheel(self, e):
-        """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
-        self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
+    def _on_side_wheel_global(self, e):
+        """全局滚轮: 指针在侧栏内(含各子控件/滚动条)时滚动侧栏, 其余区域不干预"""
+        try:
+            w = self.winfo_containing(e.x_root, e.y_root)
+        except tk.TclError:
+            return
+        while w is not None:
+            if w is self.side_canvas or w is self.side_canvas.master:
+                self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
+                return
+            w = w.master
 
     def _apply_default_sash(self):
         """默认 sash: 底部大栏自适应 (小屏 25% 保底, 1080p 让出上区空间, 大屏 35%)"""
@@ -867,8 +874,9 @@ class NCViewer(tk.Tk):
             return
         max_r = max(r for r, _ in full)
         h = max(y for _, y in full)
-        W = max(cv.winfo_width(), 180)
-        H = max(cv.winfo_height(), 150)
+        # 用画布实际尺寸 (压缩后可能小于默认, 避免绘制被底部裁切)
+        W = cv.winfo_width() or 180
+        H = cv.winfo_height() or 140
         pad = 8
         scale = min((W - 2 * pad) / (2 * max_r), (H - 2 * pad) / h)
         if scale <= 0:
