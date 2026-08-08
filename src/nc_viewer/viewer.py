@@ -111,8 +111,8 @@ class NCViewer(tk.Tk):
         self.geometry("1280x820")
         # 默认最大化打开 (Win7 支持 state zoomed)
         self.state("zoomed")
-        # 布局可缩放下限: 再小则画布/侧栏失去可用性
-        self.minsize(960, 560)
+        # 布局可缩放下限: 低于最低支持分辨率时画布塌缩, 故设 1280x700 保底
+        self.minsize(1280, 700)
         # 窗口映射后抬高底部大栏 (稳定期由 Configure 绑定持续保持)
 
         self.result = None
@@ -205,7 +205,9 @@ class NCViewer(tk.Tk):
         # 启动稳定期(3 秒)内 body 尺寸事件会重置 sash, 期间持续重设默认位置
         self._sash_until = time.time() + 3.0
         body.bind("<Configure>", lambda e: self._maybe_apply_default_sash())
-        # 底部大栏最小 35%: 拖动 sash 时钳制
+        # 底部大栏最小 25%: 拖动与窗口缩放时均钳制 (画布优先被压缩)
+        # 窗口级 Configure 在 body 布局定型后触发, 避免中间态覆盖
+        self.bind("<Configure>", self._clamp_bottom_sash)
         body.bind("<B1-Motion>", self._clamp_bottom_sash)
 
         upper = ttk.PanedWindow(body, orient="horizontal")
@@ -445,7 +447,7 @@ class NCViewer(tk.Tk):
         loc.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 8))
         loc.columnconfigure(1, weight=1)
         ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
-        self.loc_entry = ttk.Entry(loc)
+        self.loc_entry = ttk.Entry(loc, width=12)
         self.loc_entry.grid(row=0, column=1, sticky="ew", padx=4)
         self.loc_entry.bind("<Return>", lambda e: self.jump_to_input())
         ttk.Button(loc, text="跳转", command=self.jump_to_input).grid(row=0, column=2)
@@ -460,7 +462,7 @@ class NCViewer(tk.Tk):
         sr.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
         sr.columnconfigure(1, weight=1)
         ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
-        self._search_entry = ttk.Entry(sr)
+        self._search_entry = ttk.Entry(sr, width=12)
         self._search_entry.grid(row=0, column=1, sticky="ew", padx=4)
         self._search_entry.bind("<Return>", lambda e: self.search_nc())
         ttk.Button(sr, text="搜索", command=self.search_nc).grid(row=0, column=2)
@@ -508,7 +510,7 @@ class NCViewer(tk.Tk):
         segbox.grid(row=6, column=0, columnspan=4, sticky="nsew", pady=(2, 0))
         segbox.columnconfigure(0, weight=1)
         segbox.rowconfigure(0, weight=1)
-        self.seg_listbox = tk.Listbox(segbox, width=24, exportselection=False,
+        self.seg_listbox = tk.Listbox(segbox, width=18, exportselection=False,
                                       activestyle="dotbox",
                                       selectmode="multiple", relief="flat",
                                       highlightthickness=1,
@@ -541,11 +543,11 @@ class NCViewer(tk.Tk):
         self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
 
     def _apply_default_sash(self):
-        """默认 sash: 底部大栏 25%~35% 自适应 (小屏取小值给上区空间)"""
+        """默认 sash: 底部大栏自适应 (小屏 25% 保底, 1080p 让出上区空间, 大屏 35%)"""
         try:
             h = self.body_pane.winfo_height()
             if h > 300:
-                bottom = min(0.35 * h, max(280.0, 0.25 * h))
+                bottom = max(0.25 * h, min(0.35 * h, h - 700.0))
                 self.body_pane.sashpos(0, int(h - bottom))
         except tk.TclError:
             pass
