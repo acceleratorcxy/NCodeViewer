@@ -65,6 +65,31 @@ def _compute_lead_skip(moves):
     return n
 
 
+def _make_scroll_col(parent):
+    """双轴滚动列容器: 返回 (box, canvas, inner)。
+
+    内容超出时竖向/横向滚动条生效; 宽度不足时内容按需求宽度撑开 (横向滚动)。
+    """
+    box = ttk.Frame(parent, style="Panel.TFrame")
+    box.columnconfigure(0, weight=1)
+    box.rowconfigure(0, weight=1)
+    canvas = tk.Canvas(box, bg=theme.PANEL, highlightthickness=0, width=200)
+    vsb = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+    hsb = ttk.Scrollbar(box, orient="horizontal", command=canvas.xview)
+    canvas.config(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
+    inner = ttk.Frame(canvas, style="Panel.TFrame")
+    win = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>", lambda e, c=canvas: c.configure(
+        scrollregion=c.bbox("all")))
+    canvas.bind("<Configure>",
+                lambda e, c=canvas, i=inner, w=win: c.itemconfigure(
+                    w, width=max(e.width, i.winfo_reqwidth())))
+    return box, canvas, inner
+
+
 def _mpf_program_name(text):
     """MPF 头部程序名: 头部文本中括号内的标识符 (部分系统格式)"""
     m = re.search(r"\(([A-Za-z0-9_\-]{2,})\)", text[:2000])
@@ -212,10 +237,11 @@ class NCViewer(tk.Tk):
 
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
+        self.upper_pane = upper
         # 底部大栏默认抬高: 权重 1 -> 2 (约占 1/3 高度)
 
         # 左侧文件栏: 一次加载多个文件, 随时切换 (面板样式, 与画布区分)
-        fs_frame = ttk.Frame(upper, width=280, padding=6, style="Panel.TFrame")
+        fs_frame = ttk.Frame(upper, width=220, padding=6, style="Panel.TFrame")
         upper.add(fs_frame, weight=0)
         fs_frame.columnconfigure(0, weight=1)
         ttk.Label(fs_frame, text="文件列表", font=("", 10, "bold"),
@@ -223,7 +249,7 @@ class NCViewer(tk.Tk):
         # 上区: 数控程序 (MPF)
         ttk.Label(fs_frame, text="数控程序 (MPF)", font=("", 9, "bold"),
                   style="Panel.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.file_listbox = tk.Listbox(fs_frame, width=34, exportselection=False,
+        self.file_listbox = tk.Listbox(fs_frame, width=26, exportselection=False,
                                        activestyle="dotbox",
                                        selectmode="browse", relief="flat", highlightthickness=1,
                                        bg=theme.PANEL, fg=theme.TEXT,
@@ -239,7 +265,7 @@ class NCViewer(tk.Tk):
         # 下区: APT 源文件 (仅刀具信息)
         ttk.Label(fs_frame, text="APT 源文件 (刀具)", font=("", 9, "bold"),
                   style="Panel.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.apt_listbox = tk.Listbox(fs_frame, width=34, exportselection=False,
+        self.apt_listbox = tk.Listbox(fs_frame, width=26, exportselection=False,
                                       activestyle="dotbox",
                                       selectmode="browse", relief="flat", highlightthickness=1,
                                       bg=theme.PANEL, fg=theme.TEXT,
@@ -254,6 +280,13 @@ class NCViewer(tk.Tk):
         self.apt_listbox.bind("<<ListboxSelect>>", self._on_apt_select)
         fs_frame.rowconfigure(2, weight=3)
         fs_frame.rowconfigure(4, weight=1)
+        # 横向滚动条: 两个列表共享, 长文件名可横向查看
+        fxsb = ttk.Scrollbar(fs_frame, orient="horizontal")
+        self.file_listbox.config(xscrollcommand=fxsb.set)
+        self.apt_listbox.config(xscrollcommand=fxsb.set)
+        fxsb.config(command=lambda *a: (self.file_listbox.xview(*a),
+                                        self.apt_listbox.xview(*a)))
+        fxsb.grid(row=5, column=0, columnspan=2, sticky="ew")
 
         # 画布
         cv_frame = ttk.Frame(upper)
@@ -317,12 +350,14 @@ class NCViewer(tk.Tk):
         self._side_window = self.side_canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.columnconfigure(0, weight=1)
         inner.bind("<Configure>", lambda e: self.side_canvas.configure(
-            scrollregion=(0, 0,
-                          max(self.side_canvas.winfo_width(), inner.winfo_reqwidth()),
-                          max(self.side_canvas.winfo_height(), inner.winfo_reqheight()))))
-        self.side_canvas.bind("<Configure>",
-                              lambda e: self.side_canvas.itemconfigure(
-                                  self._side_window, width=e.width, height=e.height))
+            scrollregion=inner.bbox("all")))   # 覆盖实际渲染范围
+        def _fit_side_inner(ev):
+            # 窗口项高度 = max(视口, 内容需求): 内容超出时可滚动, 未超出时贴底拉伸
+            need = inner.winfo_reqheight()
+            self.side_canvas.itemconfigure(self._side_window,
+                                           width=ev.width,
+                                           height=max(ev.height, need))
+        self.side_canvas.bind("<Configure>", _fit_side_inner)
         # 滚轮: 全局捕获 + 指针位置判断 (子控件上滚动也能带动侧栏)
         self.bind_all("<MouseWheel>", self._on_side_wheel_global)
 
@@ -396,6 +431,12 @@ class NCViewer(tk.Tk):
         # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
         code_split = ttk.Panedwindow(body, orient="horizontal")
         body.add(code_split, weight=2)
+        self.code_split = code_split
+        # 两侧栏最小宽度: 文件栏>=200, 侧栏>=240, 右栏>=430 (画布优先压缩)
+        upper.bind("<B1-Motion>", self._clamp_pane_mins)
+        upper.bind("<Configure>", self._clamp_pane_mins, add="+")
+        code_split.bind("<B1-Motion>", self._clamp_pane_mins)
+        code_split.bind("<Configure>", self._clamp_pane_mins, add="+")
         code_frame = ttk.Frame(code_split)
         code_split.add(code_frame, weight=3)
         ttk.Label(code_frame, text="NC 代码 (点击行选中目标行)", padding=(4, 2)).pack(side="top", fill="x")
@@ -429,14 +470,20 @@ class NCViewer(tk.Tk):
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
 
-        # 右侧面板双列: 左 = 按行定位 + 搜索定位, 右 = 段控制
-        right = ttk.Frame(code_split, width=560, padding=8, style="Panel.TFrame")
+        # 右侧面板双列: 左 = 按行定位+搜索定位, 右 = 段控制 (各为双轴滚动容器)
+        right = ttk.Frame(code_split, width=460, padding=6, style="Panel.TFrame")
         code_split.add(right, weight=0)
         right.columnconfigure(0, weight=1)
         right.columnconfigure(1, weight=1)
-        right.rowconfigure(1, weight=1)
-        loc = ttk.LabelFrame(right, text="按行定位", padding=8, style="Panel.TLabelframe")
-        loc.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 8))
+        right.rowconfigure(0, weight=1)
+        lbox, _lcv, lin = _make_scroll_col(right)
+        lbox.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        lin.columnconfigure(0, weight=1)
+        rbox, _rcv, rin = _make_scroll_col(right)
+        rbox.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        rin.columnconfigure(0, weight=1)
+        loc = ttk.LabelFrame(lin, text="按行定位", padding=8, style="Panel.TLabelframe")
+        loc.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         loc.columnconfigure(1, weight=1)
         ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
         self.loc_entry = ttk.Entry(loc, width=12)
@@ -450,8 +497,8 @@ class NCViewer(tk.Tk):
         ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(
             row=2, column=1, pady=(6, 0), sticky="w")
 
-        sr = ttk.LabelFrame(right, text="搜索定位", padding=8, style="Panel.TLabelframe")
-        sr.grid(row=1, column=0, sticky="nsew", padx=(0, 4))
+        sr = ttk.LabelFrame(lin, text="搜索定位", padding=8, style="Panel.TLabelframe")
+        sr.grid(row=1, column=0, sticky="ew")
         sr.columnconfigure(1, weight=1)
         ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
         self._search_entry = ttk.Entry(sr, width=12)
@@ -464,8 +511,8 @@ class NCViewer(tk.Tk):
             row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         # 右列: 段控制 (抬刀平面/导航/段列表/段模式)
-        segf = ttk.LabelFrame(right, text="按段浏览", padding=8, style="Panel.TLabelframe")
-        segf.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(4, 0))
+        segf = ttk.LabelFrame(rin, text="按段浏览", padding=8, style="Panel.TLabelframe")
+        segf.grid(row=0, column=0, sticky="ew")
         segf.columnconfigure(1, weight=1)
         segf.rowconfigure(6, weight=1)      # 段列表随底部大栏高度伸缩
         ttk.Label(segf, text="抬刀平面 Z:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
@@ -543,11 +590,11 @@ class NCViewer(tk.Tk):
             w = w.master
 
     def _apply_default_sash(self):
-        """默认 sash: 底部大栏自适应 (小屏 25% 保底, 1080p 让出上区空间, 大屏 35%)"""
+        """默认 sash: 底部大栏自适应 (小屏 25% 保底, 1080p 更高, 大屏 35%)"""
         try:
             h = self.body_pane.winfo_height()
             if h > 300:
-                bottom = max(0.25 * h, min(0.35 * h, h - 700.0))
+                bottom = max(0.25 * h, min(0.35 * h, h - 620.0))
                 self.body_pane.sashpos(0, int(h - bottom))
         except tk.TclError:
             pass
@@ -566,6 +613,23 @@ class NCViewer(tk.Tk):
                 max_pos = int(h * 0.75)
                 if pos > max_pos:
                     self.body_pane.sashpos(0, max_pos)
+        except tk.TclError:
+            pass
+
+    def _clamp_pane_mins(self, e):
+        """两侧栏最小宽度 (画布优先被压缩): 文件栏>=200, 侧栏>=240, 右栏>=430"""
+        try:
+            up = self.upper_pane
+            uw = up.winfo_width()
+            if uw > 100:
+                if up.sashpos(0) < 200:
+                    up.sashpos(0, 200)
+                if uw - up.sashpos(1) < 240:
+                    up.sashpos(1, uw - 240)
+            cs = self.code_split
+            cw = cs.winfo_width()
+            if cw > 100 and cw - cs.sashpos(0) < 430:
+                cs.sashpos(0, cw - 430)
         except tk.TclError:
             pass
 

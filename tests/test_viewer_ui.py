@@ -83,8 +83,8 @@ def test_file_list_dual_zones_and_association(app, tmp_path):
 
 
 def test_file_listbox_wide_enough(app):
-    """文件列表应足够宽以容纳长文件名(字符宽度>=30)"""
-    assert int(app.file_listbox["width"]) >= 30
+    """文件列表应足够宽以容纳长文件名(字符宽度>=24)"""
+    assert int(app.file_listbox["width"]) >= 24
 
 
 def test_top_toolbar_keeps_open_file_entry(app):
