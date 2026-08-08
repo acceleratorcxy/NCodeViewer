@@ -27,8 +27,8 @@ from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
 from .parser import compute_stats, parse_nc
-from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_profile_points,
-                   tool_summary)
+from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_overall_height,
+                   tool_profile_points, tool_summary)
 
 
 def _sample_dir():
@@ -154,10 +154,11 @@ class NCViewer(tk.Tk):
             ttk.Button(top, text=v, width=3,
                        command=lambda vv=v: self.set_view_preset(vv)).pack(side="left", padx=1)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
+        # 开关用 _view_refresh: 播放/演示中切换不退出轨迹模式
         ttk.Checkbutton(top, text="显示G0快移", variable=self.show_g0,
-                        command=self.render).pack(side="left")
+                        command=self._view_refresh).pack(side="left")
         self.tool_chk = ttk.Checkbutton(top, text="显示刀具", variable=self.show_tool,
-                                        command=self.render)
+                                        command=self._view_refresh)
         self.tool_chk.pack(side="left", padx=(8, 0))
         self.file_lbl = ttk.Label(top, text="(未打开文件)")
         self.file_lbl.pack(side="left", padx=(12, 0))
@@ -258,22 +259,9 @@ class NCViewer(tk.Tk):
         self.legend = ttk.Frame(inner, style="Panel.TFrame")
         self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
 
-        # 刀具信息行 (图例下方): 摘要 + 剖面图/自定义按钮
-        tbar = ttk.Frame(inner, style="Panel.TFrame")
-        tbar.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        tbar.columnconfigure(1, weight=1)
-        ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        self.tool_lbl = ttk.Label(tbar, text="-", style="Panel.TLabel")
-        self.tool_lbl.grid(row=0, column=1, sticky="w", padx=(4, 0))
-        self.tool_btn = ttk.Button(tbar, text="剖面图", style=theme.BTN_ACCENT,
-                                   command=self.show_tool_profile)
-        self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
-            row=1, column=1, sticky="w", pady=(4, 0))
-
         # 程序统计 (仅关键指标; 完整统计在「详情…」二级窗口)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -291,11 +279,24 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        ttk.Separator(inner, orient="horizontal").grid(row=4, column=0, sticky="ew")
+        ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
 
         self.pos_lbl = ttk.Label(inner, text="当前位置: -", justify="left",
                                  font=theme.FONT_MONO, style="Panel.TLabel")
-        self.pos_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.pos_lbl.grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        # 刀具栏 (独立一栏, 位于当前位置信息栏下方)
+        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
+        tbar.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        tbar.columnconfigure(1, weight=1)
+        ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.tool_lbl = ttk.Label(tbar, text="-", style="Panel.TLabel")
+        self.tool_lbl.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        self.tool_btn = ttk.Button(tbar, text="剖面图", style=theme.BTN_ACCENT,
+                                   command=self.show_tool_profile)
+        self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
+            row=1, column=1, sticky="w", pady=(4, 0))
 
         # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
         code_split = ttk.Panedwindow(body, orient="horizontal")
@@ -745,44 +746,51 @@ class NCViewer(tk.Tk):
     # ------------- 刀具 3D 模型 -------------
     def _tool_model_points(self, tool):
         """刀具旋转体 3D 模型点集 [(kind, [(x,y,z),...])], 本地坐标:
-        刀尖在原点, 刀具轴沿 +Z 向上"""
+        刀尖在原点, 刀具轴沿 +Z 向上; body 为半透明实体外轮廓"""
         profile = tool_profile_points(tool)
+        l = float(tool.p("l", 30.0))
+        h = tool_overall_height(tool)
+        r_top = profile[-1][0]
+        full = list(profile)
+        if h > l + 1e-9:
+            full.append((r_top, l))
+            full.append((r_top, h))          # 刀柄延伸至总长
+        max_r = max(r for r, _ in full)
         pts = []
-        # 左右剪影 (经线 0°/180°)
-        pts.append(("sil", [(r, 0.0, y) for r, y in profile]))
-        pts.append(("sil", [(-r, 0.0, y) for r, y in profile]))
-        # 两条经线 (60°/120°)
+        # 实体: 右缘(下->上) + 顶部圆 + 左缘(上->下), 闭合于刀尖
+        top_circle = [(r_top * math.cos(t), r_top * math.sin(t), h)
+                      for t in (i * math.tau / 24 for i in range(24))]
+        body = ([(r, 0.0, y) for r, y in full] + top_circle
+                + [(-r, 0.0, y) for r, y in reversed(full)])
+        pts.append(("body", body))
+        # 两条经线 (60°/120°) 作表面细节
         for ang in (math.pi / 3, 2 * math.pi / 3):
             pts.append(("mer", [(r * math.cos(ang), r * math.sin(ang), y)
-                                for r, y in profile]))
+                                for r, y in full]))
         # 关键截面圆 (最大半径处)
-        max_r = max(r for r, _ in profile)
-        for y in sorted({y for r, y in profile if abs(r - max_r) < 1e-9}):
+        for y in sorted({y for r, y in full if abs(r - max_r) < 1e-9}):
             circle = [(max_r * math.cos(t), max_r * math.sin(t), y)
                       for t in (i * math.tau / 24 for i in range(24))]
             pts.append(("cir", circle))
-        # 中心轴线与刀尖标记
-        l = float(tool.p("l", 30.0))
-        pts.append(("axis", [(0.0, 0.0, 0.0), (0.0, 0.0, l)]))
+        pts.append(("axis", [(0.0, 0.0, 0.0), (0.0, 0.0, h)]))
         pts.append(("tip", [(0.0, 0.0, 0.0)]))
         return pts
 
     def _draw_tool_model(self):
-        """画布内绘制刀具旋转 3D 模型 (刀尖对刀, 锚定当前执行位置)"""
+        """画布内绘制刀具旋转 3D 模型 (半透明实体, 刀尖对刀)"""
         if not self.show_tool.get() or not self.tool or not self.result:
             return
         tool = self.tool
         pos = (self.result.position_at_line(self.current_line)
                if self.current_line else (0.0, 0.0, 0.0))
-        l = float(tool.p("l", 30.0))
+        h = tool_overall_height(tool)
         # 最小可见尺寸: 投影高 <24px 时以刀尖为锚放大 (刀具相对零件很小)
         a0, b0 = project(pos, self.quat)
-        a1, b1 = project((pos[0], pos[1], pos[2] + l), self.quat)
+        a1, b1 = project((pos[0], pos[1], pos[2] + h), self.quat)
         px_h = abs(b1 - b0) * self.scale
         factor = 1.0
         if 0 < px_h < 24:
             factor = min(24.0 / px_h, 8.0)
-        colors = {"sil": "#c8c8c8", "mer": "#8a8a8a", "cir": "#7a7a7a", "axis": "#6e6e6e"}
         for kind, pts in self._tool_model_points(tool):
             screen = []
             for x, y, z in pts:
@@ -796,9 +804,15 @@ class NCViewer(tk.Tk):
                 self.canvas.create_oval(x0 - 4, y0 - 4, x0 + 4, y0 + 4,
                                         fill=CUR_COLOR, outline="#000000",
                                         tags="toolmodel")
+            elif kind == "body":
+                # 半透明实体 (stipple 抖动填充)
+                self.canvas.create_polygon(screen, fill="#9a9aa2",
+                                           outline="#c8c8c8", width=1,
+                                           stipple="gray50", tags="toolmodel")
             elif len(screen) >= 2:
-                kw = {"fill": colors.get(kind, "#c8c8c8"), "tags": "toolmodel"}
+                kw = {"fill": "#8a8a8a", "tags": "toolmodel"}
                 if kind == "axis":
+                    kw["fill"] = "#6e6e6e"
                     kw["dash"] = (3, 3)
                 self.canvas.create_line(screen, width=1, **kw)
 
@@ -826,16 +840,22 @@ class NCViewer(tk.Tk):
                                      lambda: self._draw_tool_profile(cv, tool, e.width, e.height))
 
     def _draw_tool_profile(self, cv, tool, W, H):
-        """按给定尺寸绘制刀具剖面图 (镜像轮廓 + 尺寸标注)"""
+        """按给定尺寸绘制刀具剖面图 (镜像轮廓 + 尺寸标注, 含刀柄与总长)"""
         cv.delete("all")
         profile = tool_profile_points(tool)
         if not profile:
             return
-        max_r = max(r for r, _ in profile)
-        l = max(y for _, y in profile)
-        # 画布缩放: 宽度含左右镜像, 高度为刃长, 留标注边距
+        l = max(y for _, y in profile)          # 刃长
+        h = tool_overall_height(tool)           # 总长 (含刀柄)
+        r_top = profile[-1][0]
+        full = list(profile)
+        if h > l + 1e-9:
+            full.append((r_top, l))
+            full.append((r_top, h))             # 刀柄延伸
+        max_r = max(r for r, _ in full)
+        # 画布缩放: 宽度含左右镜像, 高度为总长, 留标注边距
         pad = 64
-        scale = min((W - 2 * pad) / (2 * max_r), (H - 2 * pad) / l)
+        scale = min((W - 2 * pad) / (2 * max_r), (H - 2 * pad) / h)
         if scale <= 0:
             scale = 1.0
         ox = W / 2
@@ -849,21 +869,23 @@ class NCViewer(tk.Tk):
 
         # 镜像轮廓
         outline = [(0.0, 0.0)]
-        outline += [(r, y) for r, y in profile]
-        outline += [(-r, y) for r, y in reversed(profile)]
+        outline += [(r, y) for r, y in full]
+        outline += [(-r, y) for r, y in reversed(full)]
         coords = []
         for r, y in outline:
             coords.append(sx(r))
             coords.append(sy(y))
         cv.create_polygon(coords, fill="#4a4a52", outline="#c8c8c8", width=2)
         # 中心轴线 (虚线)
-        cv.create_line(sx(0), sy(0), sx(0), sy(l), fill="#6e6e6e", dash=(3, 3))
+        cv.create_line(sx(0), sy(0), sx(0), sy(h), fill="#6e6e6e", dash=(3, 3))
         # 直径标注 (最大半径处)
-        y_max = max(y for r, y in profile if abs(r - max_r) < 1e-9)
+        y_max = max(y for r, y in full if abs(r - max_r) < 1e-9)
         self._dim_h(cv, sx(-max_r), sy(y_max), sx(max_r), sy(y_max),
                     f"D{tool_summary(tool).split('D')[1].split()[0]}", "bottom")
-        # 刃长标注 (右侧)
+        # 刃长标注 (右侧) 与总长标注 (左侧)
         self._dim_v(cv, sx(max_r) + 20, sy(0), sx(max_r) + 20, sy(l), f"L{l:g}", "right")
+        if h > l + 1e-9:
+            self._dim_v(cv, sx(0) - 20, sy(0), sx(0) - 20, sy(h), f"H{h:g}", "left")
         # 特征标注 (圆角/球头/顶角/锥角)
         kind = tool.kind
         if kind == "ball":

@@ -248,6 +248,20 @@ def test_tool_profile_draw_any_size(app):
     cv.destroy()
 
 
+def test_toolbar_toggle_keeps_trace(app, tmp_path):
+    """播放中切换显示开关: 不退出轨迹模式 (G0/刀具开关走 _view_refresh)"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    app.set_current_line(2, animate=True)
+    assert app._trace_active
+    app._view_refresh()
+    assert app._trace_active
+    app.render()          # 全量渲染才退出轨迹
+    assert not app._trace_active
+
+
 def test_tool_setup_fields_follow_type(app):
     """自定义窗口: 切换类型后规格输入行跟随变化"""
     app.show_tool_setup()

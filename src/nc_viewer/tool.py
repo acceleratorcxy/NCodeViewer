@@ -39,6 +39,7 @@ class Tool:
 
 
 CUTTER_RE = re.compile(r"CUTTER\s*/(.*)", re.IGNORECASE)
+TOOLNO_RE = re.compile(r"TOOLNO\s*/(.{0,120})", re.IGNORECASE | re.DOTALL)
 NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -71,19 +72,45 @@ def parse_aptsource_tool(text: str) -> Optional[Tool]:
     e = nums[2] if len(nums) > 2 else 0.0
     a = nums[4] if len(nums) > 4 else 0.0
     b = nums[5] if len(nums) > 5 else 0.0
+    h = nums[6] if len(nums) > 6 else 0.0
     # 实测锥角可能出现在 a 位(钻头)或 b 位(反锥), 取非零者
     angle = a if a != 0.0 else b
     if d <= 0:
         return None
+    # 刃长优先 TOOLNO 第 5 位; 总长取 CUTTER 第 7 参数
+    # (TOOLNO 第 4 位的 120 是刀柄标准长, 非刀具实际总长)
+    cut_len = _toolno_lengths(text[m.start():m.start() + 300])
+    cut_len = cut_len or (e if e > 0 else 30.0)
+    total_len = h if h > 0 else cut_len
+    common = {"d": d, "l": cut_len, "h": total_len}
     if r > 0 and abs(r - d / 2) < 1e-6:
-        return Tool("ball", {"d": d, "r": r, "l": 30.0})
+        return Tool("ball", {**common, "r": r})
     if angle < 0:
-        return Tool("invtaper", {"d": d, "taper": abs(angle), "l": 30.0})
+        return Tool("invtaper", {**common, "taper": abs(angle)})
     if r == 0 and angle > 0:
         if abs(e - d / 2) < 1e-6:
-            return Tool("drill", {"d": d, "point": 2 * angle, "l": 30.0})
-        return Tool("taper", {"d": d, "taper": angle, "l": 30.0})
-    return Tool("flat", {"d": d, "r": r, "l": 30.0})
+            return Tool("drill", {**common, "point": 2 * angle})
+        return Tool("taper", {**common, "taper": angle})
+    return Tool("flat", {**common, "r": r})
+
+
+def _toolno_lengths(seg):
+    """TOOLNO/ 语句中提取刃长。
+
+    实测格式: TOOLNO/no, d, r, [锥角/顶角或空], 刀柄长, 刃长, ...,
+    按逗号位置取第 5 位 (反锥/钻头第 3 位可能为角度值, 不能数字塌缩)。
+    """
+    m = TOOLNO_RE.search(seg)
+    if not m:
+        return None
+    fields = [f.strip() for f in m.group(1).replace("$", " ").split(",")]
+    if len(fields) > 5:
+        try:
+            v = float(fields[5])
+            return v if v > 0 else None
+        except ValueError:
+            pass
+    return None
 
 
 def tool_profile_points(tool: Tool):
@@ -131,7 +158,7 @@ def tool_profile_points(tool: Tool):
 
 
 def tool_summary(tool: Tool) -> str:
-    """一行摘要, 如 '平底立铣刀 D20 R3' / '普通钻头 D2.5 顶角62°'"""
+    """一行摘要, 如 '平底立铣刀 D20 R3 L70' / '普通钻头 D2.5 顶角62° L50'"""
     name = TOOL_SPECS[tool.kind][0]
     d = tool.p("d")
     parts = [name, f"D{_fmt(d)}"]
@@ -143,4 +170,12 @@ def tool_summary(tool: Tool) -> str:
         parts.append(f"θ{_fmt(tool.p('taper'))}°")
     elif tool.kind in ("drill", "center"):
         parts.append(f"顶角{_fmt(tool.p('point'))}°")
+    parts.append(f"L{_fmt(tool.p('l', 0.0))}")
     return " ".join(parts)
+
+
+def tool_overall_height(tool: Tool) -> float:
+    """刀具总长 (含刀柄); 无总长数据时回退刃长"""
+    l = float(tool.p("l", 30.0))
+    h = float(tool.p("h", 0.0) or 0.0)
+    return h if h > l else l

@@ -87,6 +87,43 @@ def test_profile_flat_with_corner():
 
 
 def test_summary_texts():
-    assert tool_summary(Tool("ball", {"d": 10, "r": 5})) == "圆鼻立铣刀 D10 R5"
-    assert tool_summary(Tool("drill", {"d": 2.5, "point": 62})) == "普通钻头 D2.5 顶角62°"
-    assert tool_summary(Tool("center", {"d": 3, "point": 60})) == "中心钻 D3 顶角60°"
+    assert tool_summary(Tool("ball", {"d": 10, "r": 5, "l": 30})) == "圆鼻立铣刀 D10 R5 L30"
+    assert tool_summary(Tool("drill", {"d": 2.5, "point": 62, "l": 50})) == "普通钻头 D2.5 顶角62° L50"
+    assert tool_summary(Tool("center", {"d": 3, "point": 60, "l": 15})) == "中心钻 D3 顶角60° L15"
+
+
+def test_parse_toolno_lengths():
+    """刃长取 TOOLNO 第 5 位 (70), 总长取 CUTTER 第 7 参数 (30)"""
+    text = (
+        "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+        "         0.000000, 30.000000\n"
+        "TOOLNO/1,   20.000000,    3.000000,,  120.000000,$\n"
+        "   70.000000,,   30.000000,4,    0.000000,NOTE\n"
+    )
+    t = parse_aptsource_tool(text)
+    assert t is not None
+    assert t.p("l") == pytest.approx(70.0)    # 刃长
+    assert t.p("h") == pytest.approx(30.0)    # 总长 (CUTTER h, 非 TOOLNO 刀柄长 120)
+    assert "L70" in tool_summary(t)
+
+
+def test_parse_taper_toolno_with_angle_field():
+    """反锥刀 TOOLNO 第 3 位为锥角、第 5 位为 0 时, 刃长回退 CUTTER e"""
+    text = (
+        "CUTTER/ 12.000000,  3.000000,  3.000000,  3.000000,  0.000000,$\n"
+        "        -2.000000, 25.000000\n"
+        "TOOLNO/4,   10.467000,    3.000000,   -4.000000,  120.000000,$\n"
+        "    0.000000,,   25.000000,6,    0.000000,NOTE\n"
+    )
+    t = parse_aptsource_tool(text)
+    assert t is not None and t.kind == "invtaper"
+    assert t.p("l") == pytest.approx(3.0)     # TOOLNO 第5位为0 -> 回退 CUTTER e
+    assert t.p("h") == pytest.approx(25.0)    # CUTTER 第7参数
+
+
+def test_parse_fallback_lengths_without_toolno():
+    """无 TOOLNO 时回退 CUTTER 的 e 作为刃长"""
+    t = parse_aptsource_tool(CUTTER_20_3)
+    assert t is not None
+    assert t.p("l") == pytest.approx(7.0)
+    assert t.p("h") == pytest.approx(30.0)
