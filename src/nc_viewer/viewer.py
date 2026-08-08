@@ -250,7 +250,7 @@ class NCViewer(tk.Tk):
             scrollregion=self.side_canvas.bbox("all")))
         self.side_canvas.bind("<Configure>",
                               lambda e: self.side_canvas.itemconfigure(
-                                  self._side_window, width=e.width))
+                                  self._side_window, width=e.width, height=e.height))
         self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
         inner.bind("<MouseWheel>", self._on_side_wheel)
 
@@ -285,10 +285,11 @@ class NCViewer(tk.Tk):
                                  font=theme.FONT_MONO, style="Panel.TLabel")
         self.pos_lbl.grid(row=4, column=0, sticky="w", pady=(8, 0))
 
-        # 刀具栏 (独立一栏, 位于当前位置信息栏下方)
-        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        # 刀具栏: 固定在侧栏底部 (滚动区之外, 紧挨底部行按行定位面板上沿)
+        tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
+        tbar.grid(row=1, column=0, columnspan=2, sticky="sew", pady=(8, 0))
         tbar.columnconfigure(1, weight=1)
+        tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.tool_lbl = ttk.Label(tbar, text="-", style="Panel.TLabel")
         self.tool_lbl.grid(row=0, column=1, sticky="w", padx=(4, 0))
@@ -297,9 +298,9 @@ class NCViewer(tk.Tk):
         self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
-        # 剖面图直接内嵌在刀具信息下方 (放大按钮查看带尺寸标注的完整版)
-        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=150, highlightthickness=0)
-        self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        # 剖面图直接内嵌在刀具信息下方, 拉长至刀具栏底部
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=260, highlightthickness=0)
+        self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
         # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
