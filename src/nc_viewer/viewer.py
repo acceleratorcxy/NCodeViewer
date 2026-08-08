@@ -292,11 +292,15 @@ class NCViewer(tk.Tk):
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.tool_lbl = ttk.Label(tbar, text="-", style="Panel.TLabel")
         self.tool_lbl.grid(row=0, column=1, sticky="w", padx=(4, 0))
-        self.tool_btn = ttk.Button(tbar, text="剖面图", style=theme.BTN_ACCENT,
+        self.tool_btn = ttk.Button(tbar, text="放大", style=theme.BTN_ACCENT,
                                    command=self.show_tool_profile)
         self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
+        # 剖面图直接内嵌在刀具信息下方 (放大按钮查看带尺寸标注的完整版)
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=150, highlightthickness=0)
+        self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
         # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
         code_split = ttk.Panedwindow(body, orient="horizontal")
@@ -581,7 +585,7 @@ class NCViewer(tk.Tk):
             text=tool_summary(self.tool) if self.tool else "-")
 
     def _refresh_tool_ui(self):
-        """刷新刀具显示 (图例行 / 统计行 / 3D 模型开关)"""
+        """刷新刀具显示 (图例行 / 统计行 / 3D 模型开关 / 内嵌剖面图)"""
         has_tool = self.tool is not None
         self.tool_lbl.config(text=tool_summary(self.tool) if has_tool else "-")
         self.tool_btn.config(state="normal" if has_tool else "disabled")
@@ -589,6 +593,46 @@ class NCViewer(tk.Tk):
         if "tool" in self.stats_labels:
             self.stats_labels["tool"].config(
                 text=tool_summary(self.tool) if has_tool else "-")
+        self._draw_tool_profile_inline()
+
+    def _draw_tool_profile_inline(self):
+        """刀具栏内直接绘制紧凑剖面图 (含缩颈刀柄, 无尺寸标注线)"""
+        cv = self.tool_cv
+        cv.delete("all")
+        if not self.tool:
+            return
+        full = tool_full_profile(self.tool)
+        if not full:
+            return
+        max_r = max(r for r, _ in full)
+        h = max(y for _, y in full)
+        W = max(cv.winfo_width(), 180)
+        H = max(cv.winfo_height(), 150)
+        pad = 8
+        scale = min((W - 2 * pad) / (2 * max_r), (H - 2 * pad) / h)
+        if scale <= 0:
+            scale = 1.0
+        ox = W / 2
+        oy = H - pad
+        outline = ([(0.0, 0.0)]
+                   + [(r, y) for r, y in full]
+                   + [(-r, y) for r, y in reversed(full)])
+        coords = []
+        for r, y in outline:
+            coords.append(ox + r * scale)
+            coords.append(oy - y * scale)
+        cv.create_polygon(coords, fill="#4a4a52", outline="#c8c8c8", width=1)
+        cv.create_line(ox, oy, ox, oy - h * scale, fill="#6e6e6e", dash=(3, 3))
+        # 紧凑标注: 直径与刃长
+        y_max = max(y for r, y in full if abs(r - max_r) < 1e-9)
+        d = float(self.tool.p("d", 0.0))
+        cv.create_text(ox, oy - y_max * scale + 12,
+                       text=f"D{d:g}" if d else "", fill=theme.TEXT,
+                       font=theme.FONT_SMALL)
+        l = float(self.tool.p("l", 0.0))
+        cv.create_text(ox + max_r * scale + 8, oy - l * scale / 2,
+                       text=f"L{l:g}" if l else "", fill=theme.TEXT,
+                       font=theme.FONT_SMALL)
 
     def show_details(self):
         """二级窗口: 完整程序统计"""

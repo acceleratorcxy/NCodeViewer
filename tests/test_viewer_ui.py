@@ -240,6 +240,21 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
+def test_tool_profile_inline_drawn(app, tmp_path):
+    """刀具剖面图直接内嵌在刀具栏 (无需点击二级窗口)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    (tmp_path / "t_I.aptsource").write_text(
+        "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+        "         0.000000, 30.000000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.update_idletasks()
+    assert len(app.tool_cv.find_all()) > 0
+    app.tool = None
+    app._refresh_tool_ui()
+    assert len(app.tool_cv.find_all()) == 0
+
+
 def test_tool_profile_draw_any_size(app):
     """剖面图绘制函数可按任意尺寸运行"""
     cv = tk.Canvas(app, width=480, height=520)
