@@ -96,6 +96,11 @@ class NCViewer(tk.Tk):
 
         self._current_path = None        # 当前文件的完整路径 (供二级窗口标题)
 
+        # 逐行运行状态: None / "play" / "demo"
+        self._play_mode = None
+        self._play_job = None
+        self._target_line = None         # 点击代码行选中的目标行
+
         self._build_ui()
         self._bind_canvas()
 
@@ -235,7 +240,7 @@ class NCViewer(tk.Tk):
         # 代码列表
         code_frame = ttk.Frame(body)
         body.add(code_frame, weight=1)
-        ttk.Label(code_frame, text="NC 代码 (点击行定位)", padding=(4, 2)).pack(side="top", fill="x")
+        ttk.Label(code_frame, text="NC 代码 (点击行选中目标行)", padding=(4, 2)).pack(side="top", fill="x")
         cvsb = ttk.Frame(code_frame)
         cvsb.pack(side="top", fill="both", expand=True)
         xsb = ttk.Scrollbar(cvsb, orient="horizontal")
@@ -259,8 +264,33 @@ class NCViewer(tk.Tk):
         self.code.tag_configure("ln", foreground=theme.TEXT_DIM, selectbackground=theme.BG)
         self.code.tag_configure("search", background="#3a5a3a")
         self.code.tag_configure("searchcur", background="#7a9a3a", foreground="#ffffff")
+        self.code.tag_configure("target", background="#3d3d5c", foreground="#ffffff")
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
+
+        # 播放控制条 (逐行运行): 连续播放 / 单步 / 直达 / 演示
+        ctl = ttk.Frame(code_frame, padding=(4, 4), style="Panel.TFrame")
+        ctl.pack(side="bottom", fill="x")
+        ttk.Button(ctl, text="复位", command=self._reset_line).pack(side="left")
+        ttk.Button(ctl, text="◀ 上一步",
+                   command=lambda: self._step_line_ctl(-1)).pack(side="left", padx=(6, 0))
+        self.play_btn = ttk.Button(ctl, text="▶ 播放", style=theme.BTN_ACCENT,
+                                   command=self._play_toggle)
+        self.play_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(ctl, text="下一步 ▶",
+                   command=lambda: self._step_line_ctl(1)).pack(side="left", padx=(6, 0))
+        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(ctl, text="速度:", style="Panel.TLabel").pack(side="left")
+        self.speed_cb = ttk.Combobox(ctl, values=("慢", "中", "快"), width=4, state="readonly")
+        self.speed_cb.set("中")
+        self.speed_cb.pack(side="left", padx=(2, 0))
+        ttk.Separator(ctl, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(ctl, text="直达行",
+                   command=lambda: self._run_to_target(False)).pack(side="left")
+        ttk.Button(ctl, text="演示到行",
+                   command=lambda: self._run_to_target(True)).pack(side="left", padx=(6, 0))
+        self.target_lbl = ttk.Label(ctl, text="目标行: -", style="Panel.TLabel")
+        self.target_lbl.pack(side="left", padx=(10, 0))
 
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
@@ -358,6 +388,10 @@ class NCViewer(tk.Tk):
         self._search_pattern = None
         self._search_hits = []
         self._search_idx = -1
+        # 重置逐行运行状态
+        self._stop_playback()
+        self._target_line = None
+        self.target_lbl.config(text="目标行: -")
         self.file_lbl.config(text=os.path.basename(path))
         self._fill_code()
         self._fill_legend()
@@ -903,9 +937,15 @@ class NCViewer(tk.Tk):
         ln = max(1, min(len(self.lines), base + delta))
         self.set_current_line(ln)
 
-    def set_current_line(self, ln):
+    def set_current_line(self, ln, animate=False):
+        """定位到指定行。animate=True 时走轻量路径 (只更新当前行标记,
+        不重画整幅刀路), 供播放/演示逐帧使用。"""
         self.current_line = ln
-        self.render()
+        if animate:
+            self.canvas.delete("cur", "curseg")
+            self._draw_current()
+        else:
+            self.render()
         self._update_pos_info(ln)
         self._highlight_code_line(ln)
         self.loc_entry.delete(0, "end")
@@ -979,7 +1019,103 @@ class NCViewer(tk.Tk):
             return
         ln = int(idx.split(".")[0])
         ln = max(1, min(ln, len(self.lines)))
+        self._set_target(ln)
+
+    def _set_target(self, ln):
+        """点击代码行 = 选中目标行 (执行位置不动, 目标行高亮)"""
+        self._target_line = ln
+        self.code.tag_remove("target", "1.0", "end")
+        self.code.tag_add("target", f"{ln}.0", f"{ln}.end")
+        self.code.tag_raise("target")
+        self.target_lbl.config(text=f"目标行: {ln}")
+
+    # ------------- 逐行运行 (播放控制条) -------------
+    def _stop_playback(self):
+        """停止播放/演示 (幂等)"""
+        self._play_mode = None
+        if self._play_job is not None:
+            self.after_cancel(self._play_job)
+            self._play_job = None
+        if hasattr(self, "play_btn"):
+            self.play_btn.config(text="▶ 播放")
+
+    def _play_speed_ms(self):
+        return {"慢": 80, "中": 40, "快": 10}[self.speed_cb.get()]
+
+    def _play_toggle(self):
+        """▶ 播放 / 暂停 切换 (连续播放)"""
+        if not self.result:
+            return
+        if self._play_mode is not None:
+            self._stop_playback()
+            return
+        self._play_mode = "play"
+        self.play_btn.config(text="暂停")
+        self._play_tick()
+
+    def _play_tick(self):
+        if self._play_mode != "play":
+            return
+        base = self.current_line if self.current_line else 0
+        ln = base + 1
+        if ln > len(self.lines):
+            self._stop_playback()
+            return
+        self.set_current_line(ln, animate=True)
+        self._play_job = self.after(self._play_speed_ms(), self._play_tick)
+
+    def _step_line_ctl(self, delta):
+        """单步前进/后退"""
+        if not self.result:
+            return
+        self._stop_playback()
+        base = self.current_line if self.current_line else 0
+        ln = max(1, min(len(self.lines), base + delta))
         self.set_current_line(ln)
+
+    def _reset_line(self):
+        if not self.result:
+            return
+        self._stop_playback()
+        self.set_current_line(1)
+
+    def _run_to_target(self, animated):
+        """运行到选中目标行: animated=True 演示(动画), False 直接后台运算"""
+        if not self.result:
+            return
+        target = self._target_line
+        if target is None:
+            messagebox.showinfo("提示", "请先在代码列表中点击选中目标行")
+            return
+        self._stop_playback()
+        if not animated:
+            self.set_current_line(target)          # 无动态: 直接运算到该行
+            return
+        self._demo_target = target                 # 有动态: 逐帧演示推进
+        self._play_mode = "demo"
+        self.play_btn.config(text="暂停")
+        self._demo_tick()
+
+    @staticmethod
+    def _demo_step_size(target, cur):
+        """演示自适应步长: 任意距离 ≤80 帧到达; 已到达/已越过返回 0 (停止)"""
+        dist = target - cur
+        if dist <= 0:
+            return 0
+        return max(1, dist // 80)
+
+    def _demo_tick(self):
+        if self._play_mode != "demo":
+            return
+        cur = self.current_line if self.current_line else 0
+        step = self._demo_step_size(self._demo_target, cur)
+        if step <= 0:
+            self.set_current_line(self._demo_target)
+            self._stop_playback()
+            return
+        ln = min(cur + step, self._demo_target)
+        self.set_current_line(ln, animate=True)
+        self._play_job = self.after(self._play_speed_ms(), self._demo_tick)
 
 
 def main():

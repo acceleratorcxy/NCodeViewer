@@ -149,3 +149,50 @@ def test_enable_dpi_awareness_idempotent():
     from nc_viewer.viewer import _enable_dpi_awareness
     _enable_dpi_awareness()
     _enable_dpi_awareness()
+
+
+# ---------- 逐行运行 (播放控制条) ----------
+def test_playback_controls_present(app):
+    """播放控制条按钮存在"""
+    assert _find(app, "复位"), "缺少复位按钮"
+    assert _find(app, "演示到行"), "缺少演示到行按钮"
+    assert _find(app, "直达行"), "缺少直达行按钮"
+
+
+def test_set_target_does_not_move_position(app, tmp_path):
+    """点击选中目标行: 目标记录且高亮, 执行位置不动"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.set_current_line(1)
+    app._set_target(2)
+    assert app._target_line == 2
+    assert app.current_line == 1
+    assert "target" in app.code.tag_names("2.0")
+
+
+def test_run_to_target_instant(app, tmp_path):
+    """直达行: 无动画直接运算到目标行"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._set_target(2)
+    app._run_to_target(False)
+    assert app.current_line == 2
+
+
+def test_demo_step_size_adaptive():
+    """演示自适应步长: 长距离大步推进, 已过/到达停止"""
+    assert NCViewer._demo_step_size(100, 0) == 1
+    assert NCViewer._demo_step_size(5000, 0) == 62
+    assert NCViewer._demo_step_size(50, 100) <= 0
+    assert NCViewer._demo_step_size(50, 50) <= 0
+
+
+def test_set_current_line_animate_light_path(app, tmp_path):
+    """动画轻量路径: 只更新标记不崩溃"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.set_current_line(2, animate=True)
+    assert app.current_line == 2
