@@ -253,6 +253,10 @@ class NCViewer(tk.Tk):
         upper.add(cv_frame, weight=3)
         self.canvas = tk.Canvas(cv_frame, bg=theme.CANVAS_BG, highlightthickness=0)
         self.canvas.pack(side="top", fill="both", expand=True)
+        # 颜色图例: 漂浮在画布右上角 (窗口项, 随画布尺寸锚定, 不随视图平移)
+        self.legend = tk.Frame(self.canvas, bg=theme.PANEL,
+                               highlightthickness=1,
+                               highlightbackground=theme.BORDER_LIGHT)
 
         # 播放控制条 (逐行运行): 连续播放 / 单步 / 直达 / 演示
         ctl = ttk.Frame(cv_frame, padding=(4, 4), style="Panel.TFrame")
@@ -290,37 +294,14 @@ class NCViewer(tk.Tk):
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
 
-        # 侧栏: 图例 + 统计 + 定位 (可滚动容器, 窗口缩小时内容完整可见)
+        # 侧栏: 程序统计 + 当前位置 + 刀具 三栏直接堆叠 (无滚动, 完整显示)
         side = ttk.Frame(upper, width=260, padding=8, style="Panel.TFrame")
         upper.add(side, weight=0)
         side.columnconfigure(0, weight=1)
-        side.rowconfigure(0, weight=1)
-        self.side_canvas = tk.Canvas(side, bg=theme.PANEL, highlightthickness=0)
-        self.side_canvas.grid(row=0, column=0, sticky="nsew")
-        self.side_scroll = ttk.Scrollbar(side, orient="vertical",
-                                         command=self.side_canvas.yview)
-        self.side_scroll.grid(row=0, column=1, sticky="ns")
-        self.side_canvas.config(yscrollcommand=self.side_scroll.set)
-        inner = ttk.Frame(self.side_canvas, style="Panel.TFrame")
-        self._side_inner = inner
-        self._side_window = self.side_canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.columnconfigure(0, weight=1)
-        inner.bind("<Configure>", lambda e: self.side_canvas.configure(
-            scrollregion=self.side_canvas.bbox("all")))
-        self.side_canvas.bind("<Configure>",
-                              lambda e: self.side_canvas.itemconfigure(
-                                  self._side_window, width=e.width, height=e.height))
-        self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
-        inner.bind("<MouseWheel>", self._on_side_wheel)
 
-        ttk.Label(inner, text="颜色图例", font=("", 10, "bold"),
-                  style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        self.legend = ttk.Frame(inner, style="Panel.TFrame")
-        self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
-
-        # 程序统计: 固定于侧栏底部 (默认加载后完整显示)
+        # 程序统计
         st = ttk.LabelFrame(side, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        st.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
@@ -338,9 +319,9 @@ class NCViewer(tk.Tk):
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        # 当前位置: 只读框字段展示, 固定于程序统计下方
+        # 当前位置: 只读框字段展示
         posf = ttk.LabelFrame(side, text="当前位置", padding=8, style="Panel.TLabelframe")
-        posf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        posf.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         posf.columnconfigure(1, weight=1)
         self.pos_fields = {}
         for r, key in enumerate(("X", "Y", "Z", "S", "F", "G", "行", "段")):
@@ -367,7 +348,7 @@ class NCViewer(tk.Tk):
 
         # 刀具栏: 贴住侧栏底部
         tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=3, column=0, columnspan=2, sticky="sew")
+        tbar.grid(row=2, column=0, sticky="sew")
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
@@ -543,9 +524,6 @@ class NCViewer(tk.Tk):
         except tk.TclError:
             pass
 
-    def _on_side_wheel(self, e):
-        """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
-        self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
 
     # ------------- 文件 -------------
     def open_file_multi(self):
@@ -793,24 +771,15 @@ class NCViewer(tk.Tk):
             (self.palette[f], f"F{format(f, '.4f').rstrip('0').rstrip('.')}")
             for f in self.result.feeds
         ]
-        # 横向流式排布: 按字体测量宽度, 超出面板宽度自动换行 (多行)
-        font = tkfont.Font(font=theme.FONT_UI)
-        max_w = max(self.legend.winfo_width(), 260)
-        row = 0
-        col = 0
-        used = 0
-        for color, text in items:
-            chip_w = 22 + font.measure(text) + 12
-            if col > 0 and used + chip_w > max_w:
-                row += 1
-                col = 0
-                used = 0
+        # 漂浮图例: 每列最多 6 项, 超出向左开新列 (首列在最右)
+        n_cols = (len(items) + 5) // 6
+        for i, (color, text) in enumerate(items):
+            k = n_cols - 1 - (i // 6)      # 列号: 首列在最右, 新列向左
+            row = i % 6
             sw = tk.Label(self.legend, bg=color, width=2, height=1, relief="flat")
-            sw.grid(row=row, column=col * 2, padx=(0, 5), pady=1, sticky="w")
+            sw.grid(row=row, column=k * 2, padx=(6, 2), pady=2, sticky="w")
             ttk.Label(self.legend, text=text, style="Panel.TLabel").grid(
-                row=row, column=col * 2 + 1, sticky="w", padx=(0, 12))
-            col += 1
-            used += chip_w
+                row=row, column=k * 2 + 1, sticky="w", padx=(0, 6))
 
     # ------------- 程序统计 -------------
     def _fill_stats(self):
@@ -1405,7 +1374,17 @@ class NCViewer(tk.Tk):
         self._draw_axes()
         self._draw_current()
         self._draw_tool_model()
+        self._place_legend()
         self.status.config(text=self._status_text())
+
+    def _place_legend(self):
+        """在画布右上角重建漂浮图例窗口项"""
+        try:
+            w = self.canvas.winfo_width()
+            self.canvas.create_window((w - 10, 10), window=self.legend,
+                                      anchor="ne", tags="legend")
+        except tk.TclError:
+            pass
 
     def _draw_axes(self):
         """画出当前视角下 X(红)/Y(绿)/Z(青) 轴方向指示"""
@@ -1508,6 +1487,8 @@ class NCViewer(tk.Tk):
         dx, dy = e.x - px, e.y - py
         # 增量位移全部图元(原生 C 操作, 远快于重绘), 同时更新偏移供下次缩放重绘
         self.canvas.move("all", dx, dy)
+        # 漂浮图例窗口项补偿: 保持画布右上角固定
+        self.canvas.move("legend", -dx, -dy)
         if self._trace_active:
             # 轨迹存储坐标同步位移, 否则后续追加新点会混用新旧坐标系导致错乱
             for _, _, flat in self._trace_items:

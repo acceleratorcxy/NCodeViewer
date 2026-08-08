@@ -155,12 +155,24 @@ def test_legend_chips_present_after_load(app, tmp_path):
 
 
 # ---------- 缩放健壮性 / DPI / F 曲线拉伸 ----------
-def test_sidebar_scrollable_container(app):
-    """侧栏为可滚动容器 (Canvas + 内嵌 Frame + 滚动条)"""
-    assert app.side_canvas.winfo_exists()
-    assert app.side_scroll.winfo_exists()
-    assert app._side_inner.winfo_exists()
-    assert app.side_canvas["yscrollcommand"] != ""
+def test_legend_floats_on_canvas(app, tmp_path):
+    """颜色图例漂浮在画布右上角 (画布子窗口项, 不随视图平移)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nX20F2000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.update_idletasks()
+    assert app.legend.master is app.canvas
+    # 渲染后存在图例窗口项
+    items = [i for i in app.canvas.find_withtag("legend") if app.canvas.type(i) == "window"]
+    assert items
+    # 平移后图例位置不变 (画布右上角)
+    before = app.canvas.coords(items[0])
+    from types import SimpleNamespace
+    app._pan_start(SimpleNamespace(x=0, y=0))
+    app._pan_move(SimpleNamespace(x=30, y=10))
+    items = [i for i in app.canvas.find_withtag("legend") if app.canvas.type(i) == "window"]
+    after = app.canvas.coords(items[0])
+    assert before == after
 
 
 def test_draw_f_curve_any_size(app):
@@ -278,13 +290,11 @@ def test_tool_checkbox_in_toolbar(app):
 
 
 def test_sidebar_bottom_three_pinned(app):
-    """程序统计/当前位置/刀具三区固定侧栏底部 (完整显示), 图例滚动"""
-    inner = app._side_inner
-    assert app.legend.master is inner
+    """程序统计/当前位置/刀具三区在侧栏内完整堆叠 (无滚动容器)"""
     side = app.stats_labels["x"].master.master
     assert side is app.pos_fields["X"].master.master
     assert side is app.tool_cv.master.master
-    assert side is not inner
+    assert not hasattr(app, "side_canvas")     # 滚动容器已移除
 
 
 def test_segment_fields_and_navigation(app, tmp_path):
