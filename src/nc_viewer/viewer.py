@@ -307,7 +307,8 @@ class NCViewer(tk.Tk):
         self.canvas.bind("<B2-Motion>", self._rot_move)
         self.canvas.bind("<ButtonRelease-2>", self._rot_end)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
-        self.canvas.bind("<Configure>", lambda e: self.render() if self.result else None)
+        self.canvas.bind("<Configure>",
+                         lambda e: self._view_refresh() if self.result else None)
         self._pan_data = None
         self._rot_data = None
 
@@ -669,6 +670,13 @@ class NCViewer(tk.Tk):
             return (0.0, 0.0, 1.0, 1.0)
         return a0, b0, a1, b1
 
+    def _view_refresh(self):
+        """视图变换后的刷新: 轨迹模式重投影已画轨迹, 否则全量渲染"""
+        if self._trace_active:
+            self._trace_redraw()
+        else:
+            self.render()
+
     def fit_view(self):
         if not self.result or not self.result.moves:
             return
@@ -685,11 +693,10 @@ class NCViewer(tk.Tk):
         oy = (ch + (b0 + b1) * scale) / 2
         self.scale = scale
         self.offset = (ox, oy)
-        self.render()
+        self._view_refresh()
 
     def set_view_preset(self, name):
         self.quat = VIEW_QUAT[name]
-        self.render()
         self.fit_view()
 
     def zoom_at(self, factor, anchor):
@@ -707,7 +714,7 @@ class NCViewer(tk.Tk):
         oy = my + wy * new_scale
         self.scale = new_scale
         self.offset = (ox, oy)
-        self.render()
+        self._view_refresh()
 
     def render(self):
         self._trace_active = False        # 全量渲染即退出轨迹演示
@@ -847,6 +854,12 @@ class NCViewer(tk.Tk):
         dx, dy = e.x - px, e.y - py
         # 增量位移全部图元(原生 C 操作, 远快于重绘), 同时更新偏移供下次缩放重绘
         self.canvas.move("all", dx, dy)
+        if self._trace_active:
+            # 轨迹存储坐标同步位移, 否则后续追加新点会混用新旧坐标系导致错乱
+            for _, _, flat in self._trace_items:
+                for i in range(0, len(flat), 2):
+                    flat[i] += dx
+                    flat[i + 1] += dy
         self.offset = (ox + (e.x - sx), oy + (e.y - sy))
         self._pan_data = (sx, sy, ox, oy, e.x, e.y)
 
@@ -905,7 +918,7 @@ class NCViewer(tk.Tk):
                                         self.scale, self.offset)
         self.quat = new_quat
         self._rot_data = (e.x, e.y)
-        self.render()
+        self._view_refresh()
 
     def _rot_end(self, e):
         self._rot_data = None
@@ -1159,6 +1172,17 @@ class NCViewer(tk.Tk):
         """把轨迹绘制到"执行到 ln 行时"已完成的移动"""
         k = bisect.bisect_right(self._move_lines, ln) - 1
         self._trace_draw_to(k)
+
+    def _trace_redraw(self):
+        """用当前四元数/缩放/偏移重绘已画轨迹 (旋转/缩放/适配时不退出轨迹模式)"""
+        drawn = self._trace_drawn
+        self.canvas.delete("axes", "path", "cur", "curseg")
+        self._draw_axes()
+        self._trace_items = []
+        self._trace_drawn = 0
+        self._trace_draw_to(drawn - 1)
+        if self.current_line is not None:
+            self._draw_current()
 
     def _trace_draw_to(self, k):
         """增量绘制移动 0..k (前进追加, 后退整段重绘)"""

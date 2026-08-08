@@ -204,6 +204,42 @@ def test_set_current_line_animate_light_path(app, tmp_path):
     assert app.current_line == 2
 
 
+def test_trace_survives_zoom(app, tmp_path):
+    """轨迹模式下缩放: 不退出轨迹, 已画轨迹保持"""
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    app.set_current_line(3, animate=True)
+    n_before = len(app.canvas.find_withtag("path"))
+    app.zoom_at(1.25, None)
+    assert app._trace_active
+    assert len(app.canvas.find_withtag("path")) == n_before
+    app._rot_start(SimpleNamespace(x=100, y=100))
+    app._rot_move(SimpleNamespace(x=110, y=100))
+    assert app._trace_active
+
+
+def test_trace_pan_syncs_stored_coords(app, tmp_path):
+    """轨迹模式下平移: 存储坐标与画面位移同步, 后续追加不混坐标系"""
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    app.set_current_line(1, animate=True)
+    flat0 = app._trace_items[0][2]
+    x0, y0 = flat0[0], flat0[1]
+    app._pan_start(SimpleNamespace(x=0, y=0))
+    app._pan_move(SimpleNamespace(x=7, y=3))
+    assert app._trace_items[0][2][0] == x0 + 7
+    assert app._trace_items[0][2][1] == y0 + 3
+    # 平移后继续追加不崩溃
+    app.set_current_line(2, animate=True)
+    assert len(app.canvas.find_withtag("path")) >= 1
+
+
 def test_trace_draws_progressively(app, tmp_path):
     """轨迹渐进: 画布从空白起按行画刀路, 后退整段重绘"""
     p = tmp_path / "t.nc"
