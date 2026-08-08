@@ -20,7 +20,8 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .geometry import (BG_COLOR, CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
+from . import theme
+from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
 from .parser import parse_nc
@@ -43,6 +44,8 @@ def _sample_dir():
 class NCViewer(tk.Tk):
     def __init__(self):
         super().__init__()
+        theme.apply_theme(self)
+        self.configure(bg=theme.BG)
         self.title("NC 刀路查看器")
         self.geometry("1280x820")
 
@@ -75,7 +78,8 @@ class NCViewer(tk.Tk):
         # 顶部工具条
         top = ttk.Frame(self, padding=6)
         top.pack(side="top", fill="x")
-        ttk.Button(top, text="打开文件…", command=self.open_file_multi).pack(side="left")
+        ttk.Button(top, text="打开文件…", style=theme.BTN_ACCENT,
+                   command=self.open_file_multi).pack(side="left")
         ttk.Button(top, text="适配", command=self.fit_view).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="放大", command=lambda: self.zoom_at(1.25, None)).pack(side="left")
         ttk.Button(top, text="缩小", command=lambda: self.zoom_at(1 / 1.25, None)).pack(side="left")
@@ -103,7 +107,12 @@ class NCViewer(tk.Tk):
         fs_frame.columnconfigure(0, weight=1)
         ttk.Label(fs_frame, text="文件列表", font=("", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.file_listbox = tk.Listbox(fs_frame, exportselection=False, activestyle="dotbox",
-                                       selectmode="browse", relief="flat", highlightthickness=1)
+                                       selectmode="browse", relief="flat", highlightthickness=1,
+                                       bg=theme.PANEL, fg=theme.TEXT,
+                                       selectbackground=theme.SELECTION,
+                                       selectforeground="#ffffff",
+                                       highlightbackground=theme.BORDER,
+                                       highlightcolor=theme.ACCENT)
         self.file_listbox.grid(row=1, column=0, sticky="nsew")
         fsb = ttk.Scrollbar(fs_frame, orient="vertical", command=self.file_listbox.yview)
         fsb.grid(row=1, column=1, sticky="ns")
@@ -114,7 +123,7 @@ class NCViewer(tk.Tk):
         # 画布
         cv_frame = ttk.Frame(upper)
         upper.add(cv_frame, weight=3)
-        self.canvas = tk.Canvas(cv_frame, bg=BG_COLOR, highlightthickness=0)
+        self.canvas = tk.Canvas(cv_frame, bg=theme.CANVAS_BG, highlightthickness=0)
         self.canvas.pack(side="top", fill="both", expand=True)
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
@@ -138,7 +147,7 @@ class NCViewer(tk.Tk):
         self.loc_entry.grid(row=0, column=1, sticky="ew", padx=4)
         self.loc_entry.bind("<Return>", lambda e: self.jump_to_input())
         ttk.Button(loc, text="跳转", command=self.jump_to_input).grid(row=0, column=2)
-        ttk.Label(loc, text="例如: 12 或 N6", foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(loc, text="例如: 12 或 N6", foreground=theme.TEXT_DIM).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
         ttk.Button(loc, text="上一行", command=lambda: self.step_line(-1)).grid(row=2, column=0, pady=(6, 0))
         ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(row=2, column=1, pady=(6, 0), sticky="w")
 
@@ -152,9 +161,9 @@ class NCViewer(tk.Tk):
         self._search_entry.bind("<Return>", lambda e: self.search_nc())
         ttk.Button(sr, text="搜索", command=self.search_nc).grid(row=0, column=2)
         ttk.Button(sr, text="下一个", command=lambda: self.search_nc(next_=True)).grid(row=1, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(sr, text="在代码中查找文本并跳转", foreground="#666").grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        self.pos_lbl = ttk.Label(side, text="当前位置: -", justify="left", font=("Consolas", 10))
+        self.pos_lbl = ttk.Label(side, text="当前位置: -", justify="left", font=theme.FONT_MONO)
         self.pos_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
 
         # 代码列表
@@ -165,9 +174,10 @@ class NCViewer(tk.Tk):
         cvsb.pack(side="top", fill="both", expand=True)
         xsb = ttk.Scrollbar(cvsb, orient="horizontal")
         ysb = ttk.Scrollbar(cvsb, orient="vertical")
-        self.code = tk.Text(cvsb, wrap="none", font=("Consolas", 10), height=12,
+        self.code = tk.Text(cvsb, wrap="none", font=theme.FONT_MONO, height=12,
                             xscrollcommand=xsb.set, yscrollcommand=ysb.set,
-                            undo=False, cursor="arrow")
+                            undo=False, cursor="arrow",
+                            bg=theme.BG, fg=theme.TEXT, insertbackground=theme.TEXT)
         xsb.config(command=self.code.xview)
         ysb.config(command=self.code.yview)
         self.code.pack(side="left", fill="both", expand=True)
@@ -175,8 +185,8 @@ class NCViewer(tk.Tk):
         xsb.pack(side="bottom", fill="x")
         self.code.configure(state="disabled")
         self.code.bind("<Button-1>", self._on_code_click, add="+")
-        self.code.tag_configure("cur", background="#3a4a6a", foreground="#ffffff")
-        self.code.tag_configure("ln", foreground="#7a7a7a", selectbackground=BG_COLOR)
+        self.code.tag_configure("cur", background="#264f78", foreground="#ffffff")
+        self.code.tag_configure("ln", foreground=theme.TEXT_DIM, selectbackground=theme.BG)
         self.code.tag_configure("search", background="#3a5a3a")
         self.code.tag_configure("searchcur", background="#7a9a3a", foreground="#ffffff")
         self.code.tag_raise("search")

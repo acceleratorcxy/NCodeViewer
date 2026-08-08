@@ -11,6 +11,7 @@
 - 左侧文件栏一次加载多个文件，随时切换
 - 代码搜索定位与跳转
 - 轨道球（四元数 ArcBall）旋转：中键旋转 / 左键平移 / 滚轮缩放，旋转中心不漂移
+- 深色现代化界面（ttk clam 定制主题，纯标准库，兼容 Win7）
 
 ## 文档
 
@@ -55,7 +56,7 @@ nc-viewer
 python -m pytest
 ```
 
-共 39 例：解析（28）+ 几何（7）+ 界面结构（4）。遵循 TDD，改动后需全绿（green）再打包。
+共 42 例：解析（28）+ 几何（7）+ 界面结构（7）。遵循 TDD，改动后需全绿（green）再打包。
 
 ## 打包 EXE
 
@@ -75,6 +76,7 @@ NCodeViewer/
 ├── src/nc_viewer/        # 源码包
 │   ├── parser.py         # NC/G 代码解析（纯计算，不依赖 Tkinter）
 │   ├── geometry.py       # 配色 / 圆弧离散 / 四元数轨道旋转 / 投影（纯计算）
+│   ├── theme.py          # 深色现代化主题（配色/字体常量 + apply_theme）
 │   ├── viewer.py         # Tkinter 主窗口
 │   └── __main__.py       # python -m nc_viewer 入口
 ├── tests/                # pytest 单元测试（39 例）

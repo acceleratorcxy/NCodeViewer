@@ -5,10 +5,13 @@
 统一由顶部工具条作为文件入口。
 """
 import os
+import re
 import tkinter as tk
+from tkinter import ttk
 
 import pytest
 
+from nc_viewer import theme
 from nc_viewer.viewer import NCViewer, _sample_dir
 
 OPEN_TEXT = "打开文件…"
@@ -65,3 +68,23 @@ def test_sample_dir_dev_samples_or_home_fallback():
                             "样例文件", "数控程序")
     if os.path.isdir(expected):
         assert d == expected
+
+
+# ---------- 深色主题 ----------
+def test_dark_theme_applied(app):
+    """深色主题已应用: ttk 基座为 clam"""
+    assert ttk.Style(app).theme_use() == "clam"
+
+
+def test_canvas_uses_theme_bg(app):
+    """画布背景应使用主题常量 CANVAS_BG"""
+    assert app.canvas["bg"] == theme.CANVAS_BG
+
+
+def test_theme_colors_valid():
+    """主题颜色常量均为 #rrggbb 格式"""
+    colors = [theme.BG, theme.PANEL, theme.INPUT_BG, theme.CANVAS_BG,
+              theme.TEXT, theme.TEXT_DIM, theme.BORDER, theme.ACCENT,
+              theme.ACCENT_HOVER, theme.SELECTION]
+    for c in colors:
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", c), f"非法颜色值: {c}"
