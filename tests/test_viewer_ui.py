@@ -293,7 +293,7 @@ def test_sidebar_sections_in_scroll(app):
     """统计/位置/刀具三区在同一滚动容器, 小屏可滚动"""
     inner = app._side_inner
     assert app.stats_labels["x"].master.master is inner
-    assert app.pos_fields["X"].master.master is inner
+    assert app.pos_fields["X"].master.master.master is inner
     assert app.tool_cv.master.master is inner
     assert app.side_canvas.winfo_exists()
 

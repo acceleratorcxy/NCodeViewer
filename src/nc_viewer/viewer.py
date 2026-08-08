@@ -401,10 +401,13 @@ class NCViewer(tk.Tk):
 
         self.pos_fields = {}
         for r, k in enumerate(("X", "Y", "Z")):
-            ttk.Label(posf, text=k, style="Panel.TLabel",
-                      font=("", 9, "bold")).grid(row=r, column=0, sticky="w")
-            ent = _mk_entry(posf, 11)
-            ent.grid(row=r, column=1, sticky="ew", padx=(4, 0))
+            row = ttk.Frame(posf, style="Panel.TFrame")
+            row.grid(row=r, column=0, columnspan=2, sticky="ew")
+            row.columnconfigure(1, weight=1)
+            ttk.Label(row, text=k, style="Panel.TLabel",
+                      font=("", 9, "bold")).grid(row=0, column=0, sticky="w")
+            ent = _mk_entry(row, 11)
+            ent.grid(row=0, column=1, sticky="ew", padx=(4, 0))
             self.pos_fields[k] = ent
         # SFG 一行 (各 5 字符)
         sfg = ttk.Frame(posf, style="Panel.TFrame")
@@ -414,7 +417,8 @@ class NCViewer(tk.Tk):
             ttk.Label(sfg, text=k, style="Panel.TLabel",
                       font=("", 9, "bold")).grid(row=0, column=c * 2, sticky="w")
             ent = _mk_entry(sfg, 5)
-            ent.grid(row=0, column=c * 2 + 1, sticky="ew", padx=(2, 8))
+            ent.grid(row=0, column=c * 2 + 1, sticky="ew",
+                     padx=(2, 8) if c < 2 else (2, 0))
             self.pos_fields[k] = ent
         # 行段: 平分一行空间
         hd = ttk.Frame(posf, style="Panel.TFrame")
