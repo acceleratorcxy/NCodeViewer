@@ -324,6 +324,7 @@ class NCViewer(tk.Tk):
                               lambda e: self.side_canvas.itemconfigure(
                                   self._side_window, width=e.width, height=e.height))
         self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
+        self.side_scroll.bind("<MouseWheel>", self._on_side_wheel)
         inner.bind("<MouseWheel>", self._on_side_wheel)
 
         # 程序统计 (单列, 值全宽显示; 固定自然高度)
