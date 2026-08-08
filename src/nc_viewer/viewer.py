@@ -326,28 +326,22 @@ class NCViewer(tk.Tk):
         self.side_canvas.bind("<MouseWheel>", self._on_side_wheel)
         inner.bind("<MouseWheel>", self._on_side_wheel)
 
-        # 程序统计 (双列紧凑, F 全宽, 兼容 1366x768/1920x1080)
+        # 程序统计 (单列, 值全宽显示)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=0, column=0, sticky="ew", pady=(0, 0))
+        st.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         st.columnconfigure(1, weight=1)
-        st.columnconfigure(3, weight=1)
         self.stats_labels = {}
-        pairs = ((("x", "行程X"), ("y", "行程Y")),
-                 (("z", "行程Z"), ("s", "S转速")),
-                 (("f", "F进给"), None),
-                 (("g", "G次数"), ("tool", "刀具")))
-        for r, (left, right) in enumerate(pairs):
-            for c, item in ((0, left), (2, right)):
-                if item is None:
-                    continue
-                key, text = item
-                ttk.Label(st, text=text, style="Panel.TLabel",
-                          font=theme.FONT_SMALL).grid(row=r, column=c, sticky="w")
-                lbl = ttk.Label(st, text="-", font=theme.FONT_MONO, style="Panel.TLabel")
-                lbl.grid(row=r, column=c + 1, sticky="e", padx=(3, 8))
-                self.stats_labels[key] = lbl
+        for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
+                                         ("z", "行程 Z"), ("s", "S 转速"),
+                                         ("f", "F 进给"), ("g", "G 次数"),
+                                         ("tool", "刀具"))):
+            ttk.Label(st, text=text, style="Panel.TLabel",
+                      font=theme.FONT_SMALL).grid(row=r, column=0, sticky="w")
+            lbl = ttk.Label(st, text="-", font=theme.FONT_MONO, style="Panel.TLabel")
+            lbl.grid(row=r, column=1, sticky="e")
+            self.stats_labels[key] = lbl
         btns = ttk.Frame(st, style="Panel.TFrame")
-        btns.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(2, 0))
         ttk.Button(btns, text="详情…", style=theme.BTN_ACCENT,
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
@@ -382,10 +376,11 @@ class NCViewer(tk.Tk):
         self.pos_fields["本行"].grid(row=4, column=1, columnspan=3, sticky="ew",
                                      padx=(3, 0), pady=(2, 0))
 
-        # 刀具栏: 内容不足时弹性延伸至侧栏底部 (分界线联动)
-        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=2, column=0, sticky="nsew")
+        # 刀具栏: 自然高度贴底 (额外空间由占位行吸收, 大屏不会拉得过高)
+        ttk.Frame(inner, style="Panel.TFrame").grid(row=2, column=0, sticky="nsew")
         inner.rowconfigure(2, weight=1)
+        tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
+        tbar.grid(row=3, column=0, sticky="sew")
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
@@ -396,8 +391,8 @@ class NCViewer(tk.Tk):
         self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
-        # 剖面图直接内嵌在刀具信息下方 (默认高度兼容 1366x768/1920x1080; 空间富余时拉伸)
-        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=120, highlightthickness=0)
+        # 剖面图直接内嵌在刀具信息下方 (固定高度, 大屏不拉伸过高)
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=240, highlightthickness=0)
         self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
