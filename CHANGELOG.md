@@ -33,6 +33,8 @@
 - 样例文件不再打包进 EXE：`build_exe.bat` 移除 `--add-data "样例文件;样例文件"`；`viewer._sample_dir` 打包环境回退到用户主目录作为文件对话框初始目录（样例仅本地开发/测试用）。
 - `build_exe.bat` 的 conda python38 探测改为 `where conda` 动态定位 conda 根目录（移除本机硬编码路径，不泄漏本机路径信息）。
 - 重建 `dist\NCViewer.exe`：**10.5 MB**（原 30.3 MB，样例文件约占 20 MB），归档验证无样例条目、UCRT/tcl/tk 完整。
+### 打包
+- EXE 使用 `assets\NCodeViewer_icon.ico` 作为程序图标（`build_exe.bat` 增加 `--icon`，产物约 10.6 MB），冒烟测试通过。
 ### 测试
 - 新增 `_sample_dir` 目录定位与回退测试；测试总数 **39**（解析 28 + 几何 7 + 界面结构 4），py38 / py311 双环境全绿。
 - 更新 `README.md`、`docs/技术手册.md`、`docs/开发流程.md`：Win7 构建方式、环境要求、打包注意与 FAQ。

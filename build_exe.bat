@@ -96,12 +96,12 @@ echo [3/4] 清理旧构建产物 ...
 if exist build rmdir /s /q build
 if exist dist\NCViewer.exe del /q dist\NCViewer.exe
 
-echo [4/4] 正在打包 EXE (单文件, 不含样例文件)...
+echo [4/4] 正在打包 EXE (单文件, 不含样例文件, 图标 assets\NCodeViewer_icon.ico)...
 if defined HAS_UCRT (
     echo        检测到 conda 环境，内置 UCRT 运行时，支持裸装 Win7...
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
 ) else (
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --clean launcher.py
 )
 if errorlevel 1 goto :fail
 
