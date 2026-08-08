@@ -240,6 +240,18 @@ def test_tool_checkbox_in_toolbar(app):
     assert _find(app, "显示刀具")
 
 
+def test_position_fields_boxed_values(app, tmp_path):
+    """当前位置: 只读框展示 X/Y/Z 值"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.set_current_line(1)
+    assert app.pos_fields["X"].get() == "10.000"
+    assert app.pos_fields["Y"].get() == "20.000"
+    assert app.pos_fields["Z"].get() == "0.000"
+    assert app.pos_fields["X"]["state"] == "readonly"
+
+
 def test_tool_profile_inline_drawn(app, tmp_path):
     """刀具剖面图直接内嵌在刀具栏 (无需点击二级窗口)"""
     p = tmp_path / "t.nc"

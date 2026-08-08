@@ -29,6 +29,7 @@ SELECTION = "#094771"       # 列表/代码选中背景
 FONT_UI = ("Segoe UI", 10)       # Win7 自带; 中文由系统字体自动回退
 FONT_SMALL = ("Segoe UI", 9)
 FONT_MONO = ("Consolas", 10)     # 代码/坐标等宽
+FONT_MONO_LG = ("Consolas", 12)  # 当前位置数值框大号等宽
 
 # ---------- 样式名 ----------
 BTN = "TButton"

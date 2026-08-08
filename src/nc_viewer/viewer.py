@@ -281,9 +281,25 @@ class NCViewer(tk.Tk):
 
         ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
 
-        self.pos_lbl = ttk.Label(inner, text="当前位置: -", justify="left",
-                                 font=theme.FONT_MONO, style="Panel.TLabel")
-        self.pos_lbl.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        # 当前位置: 只读框样式字段展示 (紧凑)
+        posf = ttk.LabelFrame(inner, text="当前位置", padding=8, style="Panel.TLabelframe")
+        posf.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        posf.columnconfigure(1, weight=1)
+        self.pos_fields = {}
+        for r, axis in enumerate(("X", "Y", "Z")):
+            ttk.Label(posf, text=axis, style="Panel.TLabel",
+                      font=("", 10, "bold")).grid(row=r, column=0, sticky="w")
+            ent = tk.Entry(posf, width=10, state="readonly",
+                           readonlybackground=theme.INPUT_BG, fg=theme.TEXT,
+                           font=theme.FONT_MONO_LG, justify="right",
+                           relief="solid", bd=1, highlightthickness=1,
+                           highlightbackground=theme.BORDER_LIGHT,
+                           highlightcolor=theme.ACCENT)
+            ent.grid(row=r, column=1, sticky="ew", padx=(6, 0), pady=1)
+            self.pos_fields[axis] = ent
+        self.pos_line_lbl = ttk.Label(posf, text="本行: -", style="Panel.TLabel",
+                                      font=theme.FONT_SMALL)
+        self.pos_line_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # 刀具栏: 固定在侧栏底部 (滚动区之外, 紧挨底部行按行定位面板上沿)
         tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -299,7 +315,7 @@ class NCViewer(tk.Tk):
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
         # 剖面图直接内嵌在刀具信息下方, 拉长至刀具栏底部
-        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=260, highlightthickness=0)
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=340, highlightthickness=0)
         self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
@@ -1385,18 +1401,20 @@ class NCViewer(tk.Tk):
 
     def _update_pos_info(self, ln):
         pos = self.result.position_at_line(ln)
+        for axis, v in zip(("X", "Y", "Z"), pos):
+            ent = self.pos_fields[axis]
+            ent.config(state="normal")
+            ent.delete(0, "end")
+            ent.insert(0, f"{v:.3f}")
+            ent.config(state="readonly")
         m = self.move_by_line.get(ln)
-        parts = [f"当前位置 (行{ln}):",
-                 f"  X = {pos[0]:.3f}",
-                 f"  Y = {pos[1]:.3f}",
-                 f"  Z = {pos[2]:.3f}"]
         if m is not None:
             n_str = f"N{int(m.n_number)} " if m.n_number is not None else ""
-            f_str = "G0" if m.motion == "G0" else f"{m.motion} F{format(m.feed, '.4f').rstrip('0').rstrip('.')}"
-            parts.append(f"  本行: {n_str}{f_str}")
+            f_str = ("G0" if m.motion == "G0"
+                     else f"{m.motion} F{format(m.feed, '.4f').rstrip('0').rstrip('.')}")
+            self.pos_line_lbl.config(text=f"行 {ln} | 本行: {n_str}{f_str}")
         else:
-            parts.append("  本行: 非移动指令")
-        self.pos_lbl.config(text="\n".join(parts))
+            self.pos_line_lbl.config(text=f"行 {ln} | 本行: 非移动指令")
 
     def _highlight_code_line(self, ln):
         self.code.tag_remove("cur", "1.0", "end")
