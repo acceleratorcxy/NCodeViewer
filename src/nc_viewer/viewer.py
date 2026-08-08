@@ -203,6 +203,8 @@ class NCViewer(tk.Tk):
         ctl = ttk.Frame(cv_frame, padding=(4, 4), style="Panel.TFrame")
         ctl.pack(side="bottom", fill="x")
         ttk.Button(ctl, text="复位", command=self._reset_line).pack(side="left")
+        ttk.Button(ctl, text="绘制到结尾",
+                   command=self._draw_all).pack(side="left", padx=(6, 0))
         ttk.Button(ctl, text="◀ 上一步",
                    command=lambda: self._step_line_ctl(-1)).pack(side="left", padx=(6, 0))
         self.play_btn = ttk.Button(ctl, text="▶ 播放", style=theme.BTN_ACCENT,
@@ -1557,6 +1559,16 @@ class NCViewer(tk.Tk):
             self._trace_begin()
         self.current_line = 0
         self.set_current_line(1, animate=True)
+
+    def _draw_all(self):
+        """一键绘制整条程序刀路 (轨迹模式直达结尾)"""
+        if not self.result:
+            return
+        self._stop_playback()
+        if not self._trace_active:
+            self._trace_begin()
+            self.current_line = 0
+        self.set_current_line(len(self.lines), animate=True)
 
     def _run_to_target(self, animated):
         """运行到选中目标行: animated=True 演示(动画逐帧画刀路),

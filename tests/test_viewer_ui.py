@@ -154,6 +154,18 @@ def test_enable_dpi_awareness_idempotent():
 
 
 # ---------- 逐行运行 (播放控制条) ----------
+def test_draw_all_draws_full_path(app, tmp_path):
+    """绘制到结尾: 一键画出整条刀路"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app._draw_all()
+    assert app.current_line == 3
+    assert app._trace_active
+    # 前导跳过 1 段, 其余 2 段全部画出
+    assert len(app.canvas.find_withtag("path")) == 2
+
+
 def test_play_batch_advances_multiple_lines(app, tmp_path):
     """合并跳行: 播放一次推进合并行数"""
     p = tmp_path / "t.nc"
