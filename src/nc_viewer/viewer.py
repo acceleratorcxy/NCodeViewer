@@ -469,7 +469,10 @@ class NCViewer(tk.Tk):
         self.seg_info.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Checkbutton(segf, text="仅显示勾选段", variable=self._seg_only,
                         command=self._toggle_seg_only).grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Button(segf, text="取消选择",
+                   command=self._clear_seg_selection).grid(
+            row=4, column=2, columnspan=2, sticky="w", pady=(4, 0), padx=(4, 0))
         ttk.Label(segf, text="所有段 (点击跳转):", style="Panel.TLabel").grid(
             row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
         segbox = ttk.Frame(segf, style="Panel.TFrame")
@@ -1839,6 +1842,15 @@ class NCViewer(tk.Tk):
         else:
             self._seg_checked.discard(idx)
         self._refresh_seg_list_marks()
+
+    def _clear_seg_selection(self):
+        """取消所有段的勾选"""
+        self._seg_checked.clear()
+        self._refresh_seg_list_marks()
+        if self._seg_only.get():
+            self._stop_playback()
+            self._apply_seg_filter()
+            self._update_seg_ui()
 
     def _refresh_seg_list_marks(self):
         """按勾选状态重建段列表 [x]/[ ] 标记 (Listbox 无 text itemconfig)"""
