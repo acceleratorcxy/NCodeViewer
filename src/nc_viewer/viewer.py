@@ -19,6 +19,7 @@ import math
 import os
 import re
 import sys
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
@@ -112,8 +113,7 @@ class NCViewer(tk.Tk):
         self.state("zoomed")
         # 布局可缩放下限: 再小则画布/侧栏失去可用性
         self.minsize(960, 560)
-        # 窗口映射后抬高底部大栏 (sash 一次性定位, 用户可再拖)
-        self.after(200, self._raise_bottom_bar)
+        # 窗口映射后抬高底部大栏 (稳定期由 Configure 绑定持续保持)
 
         self.result = None
         self.lines = []
@@ -197,6 +197,9 @@ class NCViewer(tk.Tk):
         body = ttk.PanedWindow(self, orient="vertical")
         body.pack(side="top", fill="both", expand=True, padx=6, pady=4)
         self.body_pane = body
+        # 启动稳定期(3 秒)内 body 尺寸事件会重置 sash, 期间持续重设默认位置
+        self._sash_until = time.time() + 3.0
+        body.bind("<Configure>", lambda e: self._maybe_apply_default_sash())
 
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
@@ -512,14 +515,19 @@ class NCViewer(tk.Tk):
         self._pan_data = None
         self._rot_data = None
 
-    def _raise_bottom_bar(self):
-        """默认抬高底部大栏 (NC 代码+定位/搜索+段控制), 底部约占 45%"""
+    def _apply_default_sash(self):
+        """默认 sash: 底部大栏约占 45% 窗口高度"""
         try:
             h = self.body_pane.winfo_height()
             if h > 300:
                 self.body_pane.sashpos(0, int(h * 0.55))
         except tk.TclError:
             pass
+
+    def _maybe_apply_default_sash(self):
+        """启动稳定期内保持默认 sash (用户 3 秒后拖动自由)"""
+        if time.time() < self._sash_until:
+            self._apply_default_sash()
 
     def _on_side_wheel(self, e):
         """侧栏滚动容器滚轮事件 (Windows: delta 为 120 的倍数)"""
