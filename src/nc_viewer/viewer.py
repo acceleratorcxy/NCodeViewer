@@ -346,9 +346,10 @@ class NCViewer(tk.Tk):
                                           highlightcolor=theme.ACCENT)
         self.pos_fields["本行"].grid(row=8, column=1, sticky="ew", padx=(6, 0), pady=(1, 0))
 
-        # 刀具栏: 贴住侧栏底部
+        # 刀具栏: 弹性延伸至侧栏底部 (即底部大栏分界线, 随拖拽缩放)
         tbar = ttk.LabelFrame(side, text="刀具", padding=8, style="Panel.TLabelframe")
-        tbar.grid(row=2, column=0, sticky="sew")
+        tbar.grid(row=2, column=0, sticky="nsew")
+        side.rowconfigure(2, weight=1)
         tbar.columnconfigure(1, weight=1)
         tbar.rowconfigure(2, weight=1)
         ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
