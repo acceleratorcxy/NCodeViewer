@@ -12,7 +12,9 @@ from tkinter import ttk
 import pytest
 
 from nc_viewer import theme
+from nc_viewer.tool import Tool
 from nc_viewer.viewer import NCViewer, _sample_dir
+from nc_viewer.geometry import project
 
 OPEN_TEXT = "打开文件…"
 FILE_LIST_TEXT = "文件列表"
@@ -185,6 +187,80 @@ def test_direction_arrow_prominent(app):
     assert polys, "未绘制箭头"
     x0, y0, x1, y1 = app.canvas.bbox(polys[-1])
     assert (x1 - x0) >= 10 and (y1 - y0) >= 10
+
+
+# ---------- 刀具 (aptsource 解析 / 3D 模型 / 剖面图 / 自定义) ----------
+def test_tool_parsed_from_sibling_aptsource(app, tmp_path):
+    """加载 NC 时从同目录 aptsource 解析刀具并显示在统计行"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    (tmp_path / "t_I.aptsource").write_text(
+        "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+        "         0.000000, 30.000000\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert app.tool is not None and app.tool.kind == "flat"
+    assert "D20" in app.stats_labels["tool"]["text"]
+
+
+def test_tool_model_draws_and_toggles(app, tmp_path):
+    """刀具 3D 模型: 渲染出现, 开关关闭后消失"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nX20Y30\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("ball", {"d": 10, "r": 5, "l": 30})
+    app.show_tool.set(True)
+    app.set_current_line(1)
+    assert len(app.canvas.find_withtag("toolmodel")) > 0
+    app.show_tool.set(False)
+    app.render()
+    assert len(app.canvas.find_withtag("toolmodel")) == 0
+
+
+def test_tool_tip_anchored_at_position(app, tmp_path):
+    """刀尖对刀: 模型刀尖投影 ≈ 当前执行位置屏幕坐标"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("flat", {"d": 10, "r": 0, "l": 30})
+    app.show_tool.set(True)          # 共享 fixture: 显式重置开关状态
+    app.set_current_line(1)
+    pos = app.result.position_at_line(1)
+    a, b = project(pos, app.quat)
+    ex, ey = app.world_to_canvas(a, b)
+    tips = [i for i in app.canvas.find_withtag("toolmodel")
+            if app.canvas.type(i) == "oval"]
+    assert tips, "缺少刀尖标记"
+    x0, y0, x1, y1 = app.canvas.bbox(tips[0])
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    assert abs(cx - ex) < 3 and abs(cy - ey) < 3
+
+
+def test_tool_checkbox_in_toolbar(app):
+    """顶部工具条含「显示刀具」开关"""
+    assert _find(app, "显示刀具")
+
+
+def test_tool_profile_draw_any_size(app):
+    """剖面图绘制函数可按任意尺寸运行"""
+    cv = tk.Canvas(app, width=480, height=520)
+    app._draw_tool_profile(cv, Tool("flat", {"d": 20, "r": 3, "l": 30}), 480, 520)
+    assert len(cv.find_all()) > 0
+    cv.destroy()
+
+
+def test_tool_setup_fields_follow_type(app):
+    """自定义窗口: 切换类型后规格输入行跟随变化"""
+    app.show_tool_setup()
+    assert len(app._setup_entries) == 3          # 默认平底: D/R/L
+    app._setup_kind_var.set("中心钻")
+    app._setup_kind_cb.event_generate("<<ComboboxSelected>>")
+    app.update_idletasks()
+    assert "point" in app._setup_entries and "r" not in app._setup_entries
+    app._setup_kind_var.set("反锥立铣刀")
+    app._setup_kind_cb.event_generate("<<ComboboxSelected>>")
+    app.update_idletasks()
+    assert "taper" in app._setup_entries
+    app._setup_win.destroy()
 
 
 def test_lead_skip_skips_origin_approach(app, tmp_path):

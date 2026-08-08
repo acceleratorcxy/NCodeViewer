@@ -27,6 +27,8 @@ from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
                        build_palette, color_of_move, compensate_center,
                        move_points_3d, orbit_rotate, project, quat_rotate)
 from .parser import compute_stats, parse_nc
+from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_profile_points,
+                   tool_summary)
 
 
 def _sample_dir():
@@ -126,6 +128,12 @@ class NCViewer(tk.Tk):
         self._move_lines = []            # 每条的 line_number, 供 bisect 定位
         self._lead_skip = 0              # 前导跳过数 (从原点出发的起始进给段)
 
+        # 刀具: 解析自 aptsource, 自定义优先; show_tool 控制 3D 模型显示
+        self.tool = None
+        self.custom_tool = None
+        self._parsed_tool = None
+        self.show_tool = tk.BooleanVar(value=True)
+
         self._build_ui()
         self._bind_canvas()
 
@@ -148,6 +156,9 @@ class NCViewer(tk.Tk):
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Checkbutton(top, text="显示G0快移", variable=self.show_g0,
                         command=self.render).pack(side="left")
+        self.tool_chk = ttk.Checkbutton(top, text="显示刀具", variable=self.show_tool,
+                                        command=self.render)
+        self.tool_chk.pack(side="left", padx=(8, 0))
         self.file_lbl = ttk.Label(top, text="(未打开文件)")
         self.file_lbl.pack(side="left", padx=(12, 0))
 
@@ -247,56 +258,50 @@ class NCViewer(tk.Tk):
         self.legend = ttk.Frame(inner, style="Panel.TFrame")
         self.legend.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
 
+        # 刀具信息行 (图例下方): 摘要 + 剖面图/自定义按钮
+        tbar = ttk.Frame(inner, style="Panel.TFrame")
+        tbar.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        tbar.columnconfigure(1, weight=1)
+        ttk.Label(tbar, text="刀具:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.tool_lbl = ttk.Label(tbar, text="-", style="Panel.TLabel")
+        self.tool_lbl.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        self.tool_btn = ttk.Button(tbar, text="剖面图", style=theme.BTN_ACCENT,
+                                   command=self.show_tool_profile)
+        self.tool_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
+            row=1, column=1, sticky="w", pady=(4, 0))
+
         # 程序统计 (仅关键指标; 完整统计在「详情…」二级窗口)
         st = ttk.LabelFrame(inner, text="程序统计", padding=8, style="Panel.TLabelframe")
-        st.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        st.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         st.columnconfigure(1, weight=1)
         self.stats_labels = {}
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
                                          ("z", "行程 Z"), ("s", "S 转速"),
-                                         ("f", "F 进给"), ("g", "G 次数"))):
+                                         ("f", "F 进给"), ("g", "G 次数"),
+                                         ("tool", "刀具"))):
             ttk.Label(st, text=text, style="Panel.TLabel").grid(row=r, column=0, sticky="w", pady=1)
             lbl = ttk.Label(st, text="-", font=theme.FONT_MONO, style="Panel.TLabel")
             lbl.grid(row=r, column=1, sticky="e", pady=1)
             self.stats_labels[key] = lbl
         btns = ttk.Frame(st, style="Panel.TFrame")
-        btns.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        btns.grid(row=len(("x", "y", "z", "s", "f", "g", "tool")), column=0,
+                  columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(btns, text="详情…", style=theme.BTN_ACCENT,
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
 
-        ttk.Separator(inner, orient="horizontal").grid(row=3, column=0, sticky="ew")
-        loc = ttk.LabelFrame(inner, text="按行定位", padding=8, style="Panel.TLabelframe")
-        loc.grid(row=4, column=0, sticky="ew", pady=8)
-        loc.columnconfigure(1, weight=1)
-        ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
-        self.loc_entry = ttk.Entry(loc)
-        self.loc_entry.grid(row=0, column=1, sticky="ew", padx=4)
-        self.loc_entry.bind("<Return>", lambda e: self.jump_to_input())
-        ttk.Button(loc, text="跳转", command=self.jump_to_input).grid(row=0, column=2)
-        ttk.Label(loc, text="例如: 12 或 N6", foreground=theme.TEXT_DIM).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        ttk.Button(loc, text="上一行", command=lambda: self.step_line(-1)).grid(row=2, column=0, pady=(6, 0))
-        ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(row=2, column=1, pady=(6, 0), sticky="w")
-
-        # 搜索定位
-        sr = ttk.LabelFrame(inner, text="搜索定位", padding=8, style="Panel.TLabelframe")
-        sr.grid(row=5, column=0, sticky="ew", pady=(0, 8))
-        sr.columnconfigure(1, weight=1)
-        ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
-        self._search_entry = ttk.Entry(sr)
-        self._search_entry.grid(row=0, column=1, sticky="ew", padx=4)
-        self._search_entry.bind("<Return>", lambda e: self.search_nc())
-        ttk.Button(sr, text="搜索", command=self.search_nc).grid(row=0, column=2)
-        ttk.Button(sr, text="下一个", command=lambda: self.search_nc(next_=True)).grid(row=1, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Separator(inner, orient="horizontal").grid(row=4, column=0, sticky="ew")
 
         self.pos_lbl = ttk.Label(inner, text="当前位置: -", justify="left",
                                  font=theme.FONT_MONO, style="Panel.TLabel")
-        self.pos_lbl.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self.pos_lbl.grid(row=5, column=0, sticky="w", pady=(8, 0))
 
-        # 代码列表
-        code_frame = ttk.Frame(body)
-        body.add(code_frame, weight=1)
+        # 代码列表 + 右侧定位/搜索面板 (与上方侧栏同列)
+        code_split = ttk.Panedwindow(body, orient="horizontal")
+        body.add(code_split, weight=1)
+        code_frame = ttk.Frame(code_split)
+        code_split.add(code_frame, weight=3)
         ttk.Label(code_frame, text="NC 代码 (点击行选中目标行)", padding=(4, 2)).pack(side="top", fill="x")
         cvsb = ttk.Frame(code_frame)
         cvsb.pack(side="top", fill="both", expand=True)
@@ -324,6 +329,38 @@ class NCViewer(tk.Tk):
         self.code.tag_configure("target", background="#3d3d5c", foreground="#ffffff")
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
+
+        # 右侧面板: 按行定位 + 搜索定位 (与上方侧栏同列对齐)
+        right = ttk.Frame(code_split, width=380, padding=8, style="Panel.TFrame")
+        code_split.add(right, weight=0)
+        right.columnconfigure(0, weight=1)
+        loc = ttk.LabelFrame(right, text="按行定位", padding=8, style="Panel.TLabelframe")
+        loc.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        loc.columnconfigure(1, weight=1)
+        ttk.Label(loc, text="行号 / N号:").grid(row=0, column=0, sticky="w")
+        self.loc_entry = ttk.Entry(loc)
+        self.loc_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        self.loc_entry.bind("<Return>", lambda e: self.jump_to_input())
+        ttk.Button(loc, text="跳转", command=self.jump_to_input).grid(row=0, column=2)
+        ttk.Label(loc, text="例如: 12 或 N6", foreground=theme.TEXT_DIM).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Button(loc, text="上一行", command=lambda: self.step_line(-1)).grid(
+            row=2, column=0, pady=(6, 0))
+        ttk.Button(loc, text="下一行", command=lambda: self.step_line(1)).grid(
+            row=2, column=1, pady=(6, 0), sticky="w")
+
+        sr = ttk.LabelFrame(right, text="搜索定位", padding=8, style="Panel.TLabelframe")
+        sr.grid(row=1, column=0, sticky="ew")
+        sr.columnconfigure(1, weight=1)
+        ttk.Label(sr, text="关键字:").grid(row=0, column=0, sticky="w")
+        self._search_entry = ttk.Entry(sr)
+        self._search_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        self._search_entry.bind("<Return>", lambda e: self.search_nc())
+        ttk.Button(sr, text="搜索", command=self.search_nc).grid(row=0, column=2)
+        ttk.Button(sr, text="下一个", command=lambda: self.search_nc(next_=True)).grid(
+            row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(sr, text="在代码中查找文本并跳转", foreground=theme.TEXT_DIM).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
@@ -386,12 +423,31 @@ class NCViewer(tk.Tk):
                 "move_index": {id(m): i for i, m in enumerate(result.moves)},
                 # 程序从第一个可解析点开始: 跳过从原点出发的起始进给段
                 "lead_skip": _compute_lead_skip(result.moves),
+                # 刀具: 从同目录/同名 aptsource 头部解析 (无则 None)
+                "tool": self._parse_tool_for(path, text),
             }
             new_paths.append(path)
         if not new_paths:
             return
         self._refresh_file_list()
         self.set_current_file(new_paths[0])
+
+    @staticmethod
+    def _parse_tool_for(path, text):
+        """解析刀具: 文件本身为 aptsource 直接解析; 否则查同目录同名 aptsource"""
+        if path.lower().endswith(".aptsource"):
+            return parse_aptsource_tool(text)
+        d = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        for cand in (stem + "_I.aptsource", stem + ".aptsource"):
+            p = os.path.join(d, cand)
+            if os.path.isfile(p):
+                try:
+                    with open(p, encoding="utf-8", errors="ignore") as fh:
+                        return parse_aptsource_tool(fh.read())
+                except OSError:
+                    pass
+        return None
 
     def _refresh_file_list(self):
         self.fs_paths = list(self.file_items.keys())
@@ -419,6 +475,8 @@ class NCViewer(tk.Tk):
         self._disp3d = item["disp3d"]
         self._move_index = item["move_index"]
         self._lead_skip = item["lead_skip"]
+        self._parsed_tool = item["tool"]
+        self.tool = self.custom_tool if self.custom_tool is not None else self._parsed_tool
         self._current_path = path
         self.current_line = None
         # 重置搜索状态(代码内容已重建, 旧命中行号失效)
@@ -436,6 +494,7 @@ class NCViewer(tk.Tk):
         self._fill_code()
         self._fill_legend()
         self._fill_stats()
+        self._refresh_tool_ui()
         self.fit_view()
         self.status.config(text=self._status_text())
         # 高亮文件栏当前项
@@ -517,6 +576,18 @@ class NCViewer(tk.Tk):
         g = st.g_counts
         g_txt = "  ".join(f"G{i}:{g.get(f'G{i}', 0)}" for i in (0, 1, 2, 3))
         self.stats_labels["g"].config(text=g_txt)
+        self.stats_labels["tool"].config(
+            text=tool_summary(self.tool) if self.tool else "-")
+
+    def _refresh_tool_ui(self):
+        """刷新刀具显示 (图例行 / 统计行 / 3D 模型开关)"""
+        has_tool = self.tool is not None
+        self.tool_lbl.config(text=tool_summary(self.tool) if has_tool else "-")
+        self.tool_btn.config(state="normal" if has_tool else "disabled")
+        self.tool_chk.config(state="normal" if has_tool else "disabled")
+        if "tool" in self.stats_labels:
+            self.stats_labels["tool"].config(
+                text=tool_summary(self.tool) if has_tool else "-")
 
     def show_details(self):
         """二级窗口: 完整程序统计"""
@@ -671,6 +742,243 @@ class NCViewer(tk.Tk):
                            anchor="w", fill=theme.TEXT, font=theme.FONT_SMALL)
             ly += 18
 
+    # ------------- 刀具 3D 模型 -------------
+    def _tool_model_points(self, tool):
+        """刀具旋转体 3D 模型点集 [(kind, [(x,y,z),...])], 本地坐标:
+        刀尖在原点, 刀具轴沿 +Z 向上"""
+        profile = tool_profile_points(tool)
+        pts = []
+        # 左右剪影 (经线 0°/180°)
+        pts.append(("sil", [(r, 0.0, y) for r, y in profile]))
+        pts.append(("sil", [(-r, 0.0, y) for r, y in profile]))
+        # 两条经线 (60°/120°)
+        for ang in (math.pi / 3, 2 * math.pi / 3):
+            pts.append(("mer", [(r * math.cos(ang), r * math.sin(ang), y)
+                                for r, y in profile]))
+        # 关键截面圆 (最大半径处)
+        max_r = max(r for r, _ in profile)
+        for y in sorted({y for r, y in profile if abs(r - max_r) < 1e-9}):
+            circle = [(max_r * math.cos(t), max_r * math.sin(t), y)
+                      for t in (i * math.tau / 24 for i in range(24))]
+            pts.append(("cir", circle))
+        # 中心轴线与刀尖标记
+        l = float(tool.p("l", 30.0))
+        pts.append(("axis", [(0.0, 0.0, 0.0), (0.0, 0.0, l)]))
+        pts.append(("tip", [(0.0, 0.0, 0.0)]))
+        return pts
+
+    def _draw_tool_model(self):
+        """画布内绘制刀具旋转 3D 模型 (刀尖对刀, 锚定当前执行位置)"""
+        if not self.show_tool.get() or not self.tool or not self.result:
+            return
+        tool = self.tool
+        pos = (self.result.position_at_line(self.current_line)
+               if self.current_line else (0.0, 0.0, 0.0))
+        l = float(tool.p("l", 30.0))
+        # 最小可见尺寸: 投影高 <24px 时以刀尖为锚放大 (刀具相对零件很小)
+        a0, b0 = project(pos, self.quat)
+        a1, b1 = project((pos[0], pos[1], pos[2] + l), self.quat)
+        px_h = abs(b1 - b0) * self.scale
+        factor = 1.0
+        if 0 < px_h < 24:
+            factor = min(24.0 / px_h, 8.0)
+        colors = {"sil": "#c8c8c8", "mer": "#8a8a8a", "cir": "#7a7a7a", "axis": "#6e6e6e"}
+        for kind, pts in self._tool_model_points(tool):
+            screen = []
+            for x, y, z in pts:
+                wx = pos[0] + x * factor
+                wy = pos[1] + y * factor
+                wz = pos[2] + z * factor
+                a, b = project((wx, wy, wz), self.quat)
+                screen.append(self.world_to_canvas(a, b))
+            if kind == "tip":
+                x0, y0 = screen[0]
+                self.canvas.create_oval(x0 - 4, y0 - 4, x0 + 4, y0 + 4,
+                                        fill=CUR_COLOR, outline="#000000",
+                                        tags="toolmodel")
+            elif len(screen) >= 2:
+                kw = {"fill": colors.get(kind, "#c8c8c8"), "tags": "toolmodel"}
+                if kind == "axis":
+                    kw["dash"] = (3, 3)
+                self.canvas.create_line(screen, width=1, **kw)
+
+    # ------------- 刀具剖面图 -------------
+    def show_tool_profile(self):
+        """二级窗口: 刀具直径剖面图 (镜像 + 尺寸标注, 可拉伸)"""
+        if not self.tool:
+            return
+        tool = self.tool
+        win = tk.Toplevel(self)
+        win.title(f"刀具剖面图 — {tool_summary(tool)}")
+        win.configure(bg=theme.BG)
+        win.geometry("480x520")
+        win.minsize(320, 360)
+        cv = tk.Canvas(win, bg=theme.EDITOR_BG, highlightthickness=0)
+        cv.pack(fill="both", expand=True, padx=8, pady=8)
+        self._curve_job = None
+        cv.bind("<Configure>", lambda e: self._profile_redraw(cv, tool, e))
+        self._draw_tool_profile(cv, tool, cv.winfo_width() or 464, cv.winfo_height() or 504)
+
+    def _profile_redraw(self, cv, tool, e):
+        if self._curve_job is not None:
+            self.after_cancel(self._curve_job)
+        self._curve_job = self.after(60,
+                                     lambda: self._draw_tool_profile(cv, tool, e.width, e.height))
+
+    def _draw_tool_profile(self, cv, tool, W, H):
+        """按给定尺寸绘制刀具剖面图 (镜像轮廓 + 尺寸标注)"""
+        cv.delete("all")
+        profile = tool_profile_points(tool)
+        if not profile:
+            return
+        max_r = max(r for r, _ in profile)
+        l = max(y for _, y in profile)
+        # 画布缩放: 宽度含左右镜像, 高度为刃长, 留标注边距
+        pad = 64
+        scale = min((W - 2 * pad) / (2 * max_r), (H - 2 * pad) / l)
+        if scale <= 0:
+            scale = 1.0
+        ox = W / 2
+        oy = H - pad
+
+        def sx(r):
+            return ox + r * scale
+
+        def sy(y):
+            return oy - y * scale
+
+        # 镜像轮廓
+        outline = [(0.0, 0.0)]
+        outline += [(r, y) for r, y in profile]
+        outline += [(-r, y) for r, y in reversed(profile)]
+        coords = []
+        for r, y in outline:
+            coords.append(sx(r))
+            coords.append(sy(y))
+        cv.create_polygon(coords, fill="#4a4a52", outline="#c8c8c8", width=2)
+        # 中心轴线 (虚线)
+        cv.create_line(sx(0), sy(0), sx(0), sy(l), fill="#6e6e6e", dash=(3, 3))
+        # 直径标注 (最大半径处)
+        y_max = max(y for r, y in profile if abs(r - max_r) < 1e-9)
+        self._dim_h(cv, sx(-max_r), sy(y_max), sx(max_r), sy(y_max),
+                    f"D{tool_summary(tool).split('D')[1].split()[0]}", "bottom")
+        # 刃长标注 (右侧)
+        self._dim_v(cv, sx(max_r) + 20, sy(0), sx(max_r) + 20, sy(l), f"L{l:g}", "right")
+        # 特征标注 (圆角/球头/顶角/锥角)
+        kind = tool.kind
+        if kind == "ball":
+            br = float(tool.p("r"))
+            cv.create_text(sx(br * 0.55), sy(br * 0.55) + 14, text=f"R{br:g}",
+                           fill=theme.TEXT, font=theme.FONT_SMALL)
+        elif kind == "flat" and tool.p("r", 0):
+            cr = float(tool.p("r"))
+            cv.create_text(sx(max_r - cr * 0.5), sy(cr * 0.5) + 14, text=f"R{cr:g}",
+                           fill=theme.TEXT, font=theme.FONT_SMALL)
+        elif kind in ("drill", "center"):
+            cv.create_text(sx(0), sy(l) + 24, text=f"顶角{tool.p('point'):g}°",
+                           fill=theme.TEXT, font=theme.FONT_SMALL)
+        elif kind in ("invtaper", "taper"):
+            cv.create_text(sx(max_r) + 40, sy(l / 2), text=f"θ{tool.p('taper'):g}°",
+                           fill=theme.TEXT, font=theme.FONT_SMALL)
+        cv.create_text(W / 2, 14, text=tool_summary(tool),
+                       fill=theme.TEXT, font=theme.FONT_UI)
+
+    def _dim_h(self, cv, x1, y, x2, y2, text, side):
+        """水平尺寸线 + 45° 端刻线 + 标注"""
+        yy = y + 26 if side == "bottom" else y - 26
+        cv.create_line(x1, yy, x2, yy, fill=theme.TEXT_DIM)
+        for xx in (x1, x2):
+            cv.create_line(xx, yy - 5, xx, yy + 5, fill=theme.TEXT_DIM)
+            cv.create_line(xx, yy - 5, xx - 4, yy, fill=theme.TEXT_DIM)
+            cv.create_line(xx, yy + 5, xx - 4, yy, fill=theme.TEXT_DIM)
+        cv.create_text((x1 + x2) / 2, yy - 12 if side == "bottom" else yy + 12,
+                       text=text, fill=theme.TEXT, font=theme.FONT_MONO)
+
+    def _dim_v(self, cv, x, y1, y2, y3, text, side):
+        """垂直尺寸线 + 端刻线 + 标注"""
+        xx = x + 20 if side == "right" else x - 20
+        cv.create_line(xx, y1, xx, y2, fill=theme.TEXT_DIM)
+        for yy in (y1, y2):
+            cv.create_line(xx - 5, yy, xx + 5, yy, fill=theme.TEXT_DIM)
+            cv.create_line(xx - 5, yy, xx, yy - 4, fill=theme.TEXT_DIM)
+            cv.create_line(xx + 5, yy, xx, yy - 4, fill=theme.TEXT_DIM)
+        cv.create_text(xx + 12 if side == "right" else xx - 12, (y1 + y2) / 2,
+                       text=text, fill=theme.TEXT, font=theme.FONT_MONO)
+
+    # ------------- 刀具自定义 -------------
+    def show_tool_setup(self):
+        """自定义窗口: 选择类型 -> 对应规格输入框 -> 应用/恢复自动解析"""
+        win = tk.Toplevel(self)
+        win.title("刀具自定义")
+        win.configure(bg=theme.BG)
+        win.geometry("380x340")
+        frm = ttk.Frame(win, padding=12, style="Panel.TFrame")
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+        ttk.Label(frm, text="类型:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        kind_var = tk.StringVar(value=TOOL_SPECS["flat"][0])
+        preset = self.custom_tool or self.tool
+        if preset:
+            kind_var.set(TOOL_SPECS[preset.kind][0])
+        kind_cb = ttk.Combobox(frm, textvariable=kind_var, state="readonly",
+                               values=[v[0] for v in TOOL_SPECS.values()], width=24)
+        kind_cb.grid(row=0, column=1, sticky="ew", padx=4)
+        self._setup_win = win
+        self._setup_kind_var = kind_var
+        self._setup_kind_cb = kind_cb
+        self._setup_fields = {}
+        self._setup_entries = {}
+        kind_cb.bind("<<ComboboxSelected>>",
+                     lambda e: self._rebuild_tool_fields(frm, kind_var, preset))
+        self._rebuild_tool_fields(frm, kind_var, preset)
+        btns = ttk.Frame(frm, style="Panel.TFrame")
+        btns.grid(row=99, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        ttk.Button(btns, text="应用", style=theme.BTN_ACCENT,
+                   command=lambda: self._apply_tool_setup(win, kind_var)).pack(side="left")
+        ttk.Button(btns, text="恢复自动解析",
+                   command=lambda: self._clear_custom_tool(win)).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=(8, 0))
+
+    def _rebuild_tool_fields(self, frm, kind_var, preset):
+        """按类型重建规格输入行"""
+        for w in self._setup_fields.values():
+            w.destroy()
+        self._setup_fields = {}
+        self._setup_entries = {}
+        name = kind_var.get()
+        kind = next(k for k, v in TOOL_SPECS.items() if v[0] == name)
+        p = preset.params if preset and preset.kind == kind else {}
+        for i, (key, label, default) in enumerate(TOOL_SPECS[kind][1], 1):
+            row = i
+            ttk.Label(frm, text=label, style="Panel.TLabel").grid(
+                row=row, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=str(p.get(key, default)))
+            ent = ttk.Entry(frm, textvariable=var, width=14)
+            ent.grid(row=row, column=1, sticky="ew", padx=4)
+            self._setup_fields[f"row_{key}"] = ent
+            self._setup_entries[key] = var
+
+    def _apply_tool_setup(self, win, kind_var):
+        name = kind_var.get()
+        kind = next(k for k, v in TOOL_SPECS.items() if v[0] == name)
+        params = {}
+        for key, var in self._setup_entries.items():
+            try:
+                params[key] = float(var.get())
+            except ValueError:
+                messagebox.showinfo("提示", f"字段 {key} 需要数值")
+                return
+        self.custom_tool = Tool(kind, params)
+        self.tool = self.custom_tool
+        self._refresh_tool_ui()
+        win.destroy()
+
+    def _clear_custom_tool(self, win):
+        self.custom_tool = None
+        self.tool = self._parsed_tool
+        self._refresh_tool_ui()
+        win.destroy()
+
     # ------------- 坐标变换 -------------
     def world_to_canvas(self, wx, wy):
         sx = wx * self.scale + self.offset[0]
@@ -788,6 +1096,7 @@ class NCViewer(tk.Tk):
 
         self._draw_axes()
         self._draw_current()
+        self._draw_tool_model()
         self.status.config(text=self._status_text())
 
     def _draw_axes(self):
@@ -1005,8 +1314,9 @@ class NCViewer(tk.Tk):
         if animate:
             if self._trace_active:
                 self._trace_draw_to_line(ln)
-            self.canvas.delete("cur", "curseg")
+            self.canvas.delete("cur", "curseg", "toolmodel")
             self._draw_current()
+            self._draw_tool_model()
         else:
             self.render()
         self._update_pos_info(ln)
@@ -1222,13 +1532,14 @@ class NCViewer(tk.Tk):
     def _trace_redraw(self):
         """用当前四元数/缩放/偏移重绘已画轨迹 (旋转/缩放/适配时不退出轨迹模式)"""
         drawn = self._trace_drawn
-        self.canvas.delete("axes", "path", "cur", "curseg")
+        self.canvas.delete("axes", "path", "cur", "curseg", "toolmodel")
         self._draw_axes()
         self._trace_items = []
         self._trace_drawn = self._lead_skip
         self._trace_draw_to(drawn - 1)
         if self.current_line is not None:
             self._draw_current()
+            self._draw_tool_model()
 
     def _trace_draw_to(self, k):
         """增量绘制移动 0..k (前进追加, 后退整段重绘)"""
