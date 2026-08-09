@@ -94,4 +94,8 @@ def apply_theme(root):
                     bordercolor=BORDER, arrowcolor=TEXT_DIM,
                     lightcolor=PANEL, darkcolor=PANEL, width=12)
 
+    # 进度条 (顶部栏内嵌加载进度): clam 默认条/槽为浅色, 与深色界面不协调
+    style.configure("TProgressbar", background=ACCENT, troughcolor=INPUT_BG,
+                    bordercolor=BORDER_LIGHT, lightcolor=ACCENT, darkcolor=ACCENT)
+
     return style

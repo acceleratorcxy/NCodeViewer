@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -156,6 +157,86 @@ class ProgramStats:
     f_seg_counts: dict = field(default_factory=dict)  # {feed: 段数}
     f_levels: list = field(default_factory=list)   # 首次出现序去重 F 值
     s_levels: list = field(default_factory=list)   # 首次出现序去重 S 值
+
+
+# 快移默认速度 (mm/min): 程序不含 G0 速度时用于加工时间估算
+G0_SPEED_MM_MIN = 20000.0
+
+
+def _arc_sweep_rad(move) -> float:
+    """圆弧扫掠角绝对值 (弧度), 与 geometry.arc_points 相同平面映射"""
+    if move.plane == "XY":
+        a0, b0 = move.start[0], move.start[1]
+        a1, b1 = move.end[0], move.end[1]
+        ca, cb = move.center[0], move.center[1]
+    elif move.plane == "XZ":
+        a0, b0 = move.start[0], move.start[2]
+        a1, b1 = move.end[0], move.end[2]
+        ca, cb = move.center[0], move.center[2]
+    else:  # YZ
+        a0, b0 = move.start[1], move.start[2]
+        a1, b1 = move.end[1], move.end[2]
+        ca, cb = move.center[1], move.center[2]
+    start_ang = math.atan2(b0 - cb, a0 - ca)
+    end_ang = math.atan2(b1 - cb, a1 - ca)
+    sweep = end_ang - start_ang
+    if move.cw:
+        while sweep >= 0:
+            sweep -= 2 * math.pi
+    else:
+        while sweep <= 0:
+            sweep += 2 * math.pi
+    return abs(sweep)
+
+
+def _move_path_length(move) -> float:
+    """移动路径长度 (mm): 直线取端点距; 圆弧取弧长 r*|sweep|"""
+    if move.motion in ("G2", "G3") and move.center is not None:
+        if move.plane == "XY":
+            r = math.hypot(move.start[0] - move.center[0],
+                           move.start[1] - move.center[1])
+        elif move.plane == "XZ":
+            r = math.hypot(move.start[0] - move.center[0],
+                           move.start[2] - move.center[2])
+        else:  # YZ
+            r = math.hypot(move.start[1] - move.center[1],
+                           move.start[2] - move.center[2])
+        return r * _arc_sweep_rad(move)
+    dx = move.end[0] - move.start[0]
+    dy = move.end[1] - move.start[1]
+    dz = move.end[2] - move.start[2]
+    return math.hypot(dx, dy, dz)
+
+
+def move_time_sec(move, g0_speed=G0_SPEED_MM_MIN, lift_start=False) -> float:
+    """单条移动的加工时间 (秒): 路径长度/速度*60; 切削用 F (mm/min),
+    G0 用快移速度; 无速度 (G0 之外 feed 缺失) 返回 0。
+    lift_start=True (仅用于程序首个移动): 从机器原点 (0,0,0) 出发时
+    起点按抬刀平面 (0,0,终点Z) 计算, 只算水平进给距离 (不含地面抬升虚拟段)"""
+    speed = g0_speed if move.motion == "G0" else (move.feed or 0.0)
+    if speed <= 0:
+        return 0.0
+    length = _move_path_length(move)
+    if (lift_start and move.start == (0.0, 0.0, 0.0)
+            and move.end[2] > 0):
+        length = math.hypot(move.end[0], move.end[1])   # 抬刀平面水平进给
+    return length / speed * 60.0
+
+
+def compute_machining_time(moves, move_range=None, g0_speed=G0_SPEED_MM_MIN,
+                           start=0) -> float:
+    """加工时间 (秒): 各移动时间累加; move_range 可限定移动索引范围 (段内统计);
+    start 跳过前导移动; 首个参与统计的移动应用抬刀平面起点 (见 move_time_sec)"""
+    total = 0.0
+    first = True
+    for i, m in enumerate(moves):
+        if i < start:
+            continue
+        if not _in_move_range(i, move_range):
+            continue
+        total += move_time_sec(m, g0_speed, lift_start=first)
+        first = False
+    return total
 
 
 def _in_move_range(i, move_range) -> bool:

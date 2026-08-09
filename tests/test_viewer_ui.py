@@ -153,11 +153,16 @@ def test_stats_panel_after_load(app, tmp_path):
 
 
 def test_f_curve_data_excludes_g0(app, tmp_path):
-    """F 曲线数据: 切削移动 (行号, F) 序列, G0 不参与"""
+    """F 曲线数据: 切削移动 (行号, 累计加工时间秒, F) 序列, G0 不参与但计入时间"""
     p = tmp_path / "t.nc"
     p.write_text(NC_SMALL, encoding="utf-8")
     app.open_file(str(p))
-    assert app._f_curve_data() == [(1, 1000.0), (2, 2000.0)]
+    data = app._f_curve_data()
+    assert len(data) == 2
+    assert [d[0] for d in data] == [1, 2], "行号递增"
+    assert abs(data[0][1] - 1.3416) < 1e-3, "G01 22.36mm@1000 -> 1.34s"
+    assert abs(data[1][1] - 2.0117) < 1e-3, "G02 弧长22.34mm@2000 -> 0.67s"
+    assert [d[2] for d in data] == [1000.0, 2000.0]
 
 
 def test_legend_chips_present_after_load(app, tmp_path):
@@ -190,10 +195,325 @@ def test_legend_floats_on_canvas(app, tmp_path):
 
 
 def test_draw_f_curve_any_size(app):
-    """F 曲线绘制函数可按任意尺寸运行"""
+    """F 曲线绘制函数可按任意尺寸运行 (数据: 行号, 累计秒, F)"""
     cv = tk.Canvas(app, width=600, height=400)
-    app._draw_f_curve(cv, [(1, 1000.0), (2, 2000.0), (3, 1000.0)], 600, 400)
+    data = [(1, 1.0, 1000.0), (2, 2.0, 2000.0), (3, 3.0, 1000.0)]
+    app._draw_f_curve(cv, data, 600, 400)
     assert len(cv.find_all()) > 0
+    cv.destroy()
+
+
+def test_f_curve_unit_switch(app):
+    """F 曲线横轴单位切换: 秒/分钟/小时刻度换算, 轴标签随单位"""
+    cv = tk.Canvas(app, width=640, height=420)
+    data = [(1, 100.0, 1000.0), (2, 200.0, 2000.0), (3, 300.0, 1000.0)]
+    app._draw_f_curve(cv, data, 640, 420, axis="time", unit="sec")
+    texts = [cv.itemcget(i, "text") for i in cv.find_all()
+             if cv.type(i) == "text"]
+    assert any("秒" in t for t in texts), "秒单位应有轴标签"
+    assert any(t.isdigit() for t in texts), "秒刻度为数值"
+    cv.delete("all")
+    app._draw_f_curve(cv, data, 640, 420, axis="time", unit="min")
+    texts = [cv.itemcget(i, "text") for i in cv.find_all()
+             if cv.type(i) == "text"]
+    assert any("分钟" in t for t in texts), "分钟单位应有轴标签"
+    cv.delete("all")
+    app._draw_f_curve(cv, data, 640, 420, axis="time", unit="hour")
+    texts = [cv.itemcget(i, "text") for i in cv.find_all()
+             if cv.type(i) == "text"]
+    assert any("小时" in t for t in texts), "小时单位应有轴标签"
+    cv.destroy()
+
+
+def test_f_curve_zoom_and_scroll(app):
+    """F 曲线时间轴: 滚轮以鼠标为锚横向缩放, 横向滚动条平移视口"""
+    cv = tk.Canvas(app, width=640, height=420)
+    data = [(1, 100.0, 1000.0), (2, 200.0, 2000.0), (3, 300.0, 1000.0),
+            (4, 400.0, 2000.0), (5, 500.0, 1000.0)]       # 总 500s
+    app._curve_data = data
+    app._curve_view = None
+    app._curve_axis_var = tk.StringVar(value="time")
+    app._curve_cv = cv
+    from types import SimpleNamespace
+    # 滚轮放大: 以画布中心为锚
+    app._curve_wheel(SimpleNamespace(x=320, delta=120))
+    assert app._curve_view is not None, "放大后应有视口"
+    t_lo, t_hi = app._curve_view
+    assert t_hi - t_lo < 500, "滚轮放大后视口变窄"
+    assert abs((t_lo + t_hi) / 2 - 250) < 60, "以鼠标位置为锚 (中心不变)"
+    # 滚动条平移: 移到开头/结尾
+    app._curve_hscroll("moveto", 0.0)
+    assert app._curve_view[0] < 1e-6, "滚动到开头"
+    app._curve_hscroll("moveto", 1.0)
+    assert abs(app._curve_view[1] - 500) < 1e-6, "滚动到结尾"
+    # 行号模式: 滚轮/滚动条不生效
+    app._curve_axis_var.set("line")
+    v0 = app._curve_view
+    app._curve_wheel(SimpleNamespace(x=320, delta=120))
+    assert app._curve_view == v0, "行号模式滚轮不应缩放"
+    cv.destroy()
+
+
+def test_f_curve_step_shape(app):
+    """F 曲线为阶梯线: F 阶跃变化无斜线 (水平保持 + 垂直跳变)"""
+    cv = tk.Canvas(app, width=600, height=400)
+    data = [(1, 1.0, 1000.0), (2, 2.0, 2000.0), (3, 3.0, 1000.0)]
+    app._draw_f_curve(cv, data, 600, 400, axis="time")
+    main = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"
+            and float(cv.itemcget(i, "width")) == 2.5]
+    coords = cv.coords(main[0])
+    assert len(coords) == 12, "3 数据点 -> 6 阶梯点 (12 坐标)"
+    # 水平段: (t0,F0)-(t1,F0) y 相同 (F 保持)
+    assert coords[1] == coords[3], "水平段 F 值保持"
+    # 垂直跳变: (t1,F0)-(t1,F1) x 相同, y 变化 (瞬间切换)
+    assert coords[2] == coords[4], "跳变在同一时间点"
+    assert coords[3] != coords[5], "F 值瞬间变化"
+    # 后段同构: (t2,F1)-(t2,F2) 同 x
+    assert coords[6] == coords[8]
+    cv.destroy()
+
+
+def test_f_curve_drag_coarse_then_finalize(app):
+    """滚动条拖动: 轻量粗绘 (无描边), 停止后恢复精绘 (双线)"""
+    cv = tk.Canvas(app, width=640, height=420)
+    data = [(1, 1.0, 1000.0), (2, 2.0, 2000.0), (3, 3.0, 1000.0),
+            (4, 4.0, 2000.0), (5, 5.0, 1000.0)]
+    app._draw_f_curve(cv, data, 640, 420, axis="time", coarse=True)
+    lines = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"]
+    assert len(lines) == 1, "粗绘只有主曲线 (无描边, 渲染轻量)"
+    assert float(cv.itemcget(lines[0], "width")) == 2.5
+    cv.delete("all")
+    app._draw_f_curve(cv, data, 640, 420, axis="time", coarse=False)
+    lines = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"]
+    assert len(lines) == 2, "精绘恢复双线 (描边+主曲线)"
+    # 滚动条拖动调度粗绘, 且停止后自动精绘
+    app._curve_data = data
+    app._curve_axis_var = tk.StringVar(value="time")
+    app._curve_cv = cv
+    app._curve_view = (0.0, 5.0)
+    app._curve_job = None
+    app._curve_final_job = None
+    app._curve_hscroll("moveto", 0.0)
+    assert app._curve_final_job is not None, "拖动停止后应调度精绘"
+    app.update()
+    import time
+    time.sleep(0.4)
+    app.update()
+    assert app._curve_final_job is None, "精绘已执行"
+    cv.destroy()
+
+
+def test_f_curve_decimates_large_data(app):
+    """F 曲线大数据抽稀: 全览时每像素 ≤2 点 (create_line 大点数极慢)"""
+    cv = tk.Canvas(app, width=800, height=420)
+    data = [(i, float(i), 1000.0 + (i % 5) * 100.0) for i in range(1, 20001)]
+    app._draw_f_curve(cv, data, 800, 420, axis="time")
+    main = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"
+            and float(cv.itemcget(i, "width")) == 2.5]
+    n = len(cv.coords(main[0])) // 2
+    assert n <= (800 * 2 + 4) * 2 + 2, "抽稀后阶梯点数受控 (每像素 ≤2×2)"
+    assert n > 100, "仍有足够点保持曲线形状"
+    cv.destroy()
+
+
+def test_f_curve_wheel_debounced(app):
+    """滚轮缩放防抖: 连续滚动视口立即更新, 重绘合并为一次"""
+    cv = tk.Canvas(app, width=640, height=420)
+    data = [(1, 100.0, 1000.0), (2, 200.0, 2000.0), (3, 300.0, 1000.0),
+            (4, 400.0, 2000.0), (5, 500.0, 1000.0)]
+    app._curve_data = data
+    app._curve_view = None
+    app._curve_axis_var = tk.StringVar(value="time")
+    app._curve_cv = cv
+    app._curve_job = None
+    from types import SimpleNamespace
+    app._curve_wheel(SimpleNamespace(x=320, delta=120))
+    v1 = app._curve_view
+    assert v1 is not None, "视口立即更新"
+    app._curve_wheel(SimpleNamespace(x=320, delta=120))    # 连续第二次
+    assert app._curve_view != v1, "第二次滚动继续收窄"
+    assert app._curve_job is not None, "防抖重绘任务挂起 (未立即重绘)"
+    app.update()
+    import time
+    time.sleep(0.12)
+    app.update()
+    assert app._curve_job is None, "防抖任务已执行"
+    cv.destroy()
+
+
+def test_f_curve_axis_time_and_line(app):
+    """F 曲线横轴: 默认加工时间 (mm:ss 刻度), 可切换行号 (底部配置)"""
+    cv = tk.Canvas(app, width=640, height=420)
+    data = [(1, 1.0, 1000.0), (2, 2.0, 2000.0), (3, 3.0, 1000.0)]
+    app._draw_f_curve(cv, data, 640, 420, axis="time")
+    texts = [cv.itemcget(i, "text") for i in cv.find_all()
+             if cv.type(i) == "text"]
+    assert any("加工时间" in t for t in texts), "应有横轴标签 (秒)"
+    assert any(t == "0" or t == "1" for t in texts), "时间轴数值刻度存在"
+    # 切换行号轴
+    cv.delete("all")
+    app._draw_f_curve(cv, data, 640, 420, axis="line")
+    texts = [cv.itemcget(i, "text") for i in cv.find_all()
+             if cv.type(i) == "text"]
+    assert any(t == "行号" for t in texts), "行号轴应有轴标签"
+    cv.destroy()
+
+
+def test_stats_show_machining_time(app, tmp_path):
+    """程序统计新增加工时间行: 100mm @ F1000 -> 6 秒显示 h:mm:ss"""
+    app.file_items.clear()
+    app._refresh_file_list()
+    p = tmp_path / "t.nc"
+    p.write_text("G01X100F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert app.stats_labels["time"]["text"] == "0:00:06"
+
+
+def test_stats_time_follows_picked_segment(app, tmp_path):
+    """画布拾取某段刀路: 统计加工时间显示该段时间; 取消后恢复全程序"""
+    app.file_items.clear()
+    app._refresh_file_list()
+    # 两段: 段1 ≈9s, 段2 ≈15s (F1000 各 3s 下降 + 6s/12s 水平); 抬刀平面区分段
+    p = tmp_path / "t.nc"
+    p.write_text("G0Z50\n"            # 抬刀平面定位 (0.15s)
+                 "G01Z0F1000\n"       # 段1 下降 50mm 3s
+                 "G01X100F1000\n"     # 段1 水平 100mm 6s
+                 "G0Z50\n"            # 段1 回升 0.15s
+                 "G01Z0F1000\n"       # 段2 下降 50mm 3s
+                 "G01X300F1000\n"     # 段2 水平 200mm 12s
+                 "G0Z50\n", encoding="utf-8")   # 段2 回升 0.15s
+    app.open_file(str(p))
+    assert app.stats_labels["time"]["text"] == "0:00:25"   # 24.45s 向上取整
+    # 拾取段2的移动 (行5) -> 显示段2时间 ≈15s
+    app._set_pick_time(5)
+    assert app.stats_labels["time"]["text"] == "0:00:16"   # 15.15s 向上取整
+    # 取消拾取 -> 恢复全程序
+    app._reset_pick_time()
+    assert app.stats_labels["time"]["text"] == "0:00:25"
+
+
+def test_play_progress_by_machining_time(app, tmp_path):
+    """播放时右上角进度条按加工时间显示进度百分比; 复位隐藏"""
+    app.file_items.clear()
+    app._refresh_file_list()
+    # 可见切削 2 条各 6s (G0 定位被前导跳过): 播放到第 1 条 -> 50%
+    p = tmp_path / "t.nc"
+    p.write_text("G0Y10\n"            # 定位 (前导跳过)
+                 "G01X100F1000\n"     # 6s
+                 "G01X200F1000\n",    # 6s
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.update()
+    app._build_time_prefix()
+    app._step_line_ctl(1)               # 行1 (G0 定位)
+    app._step_line_ctl(1)               # 行2 (第一条切削)
+    app._update_play_progress()
+    assert float(app._prog_bar["value"]) == pytest.approx(50.1, abs=0.2), \
+        "(0.03+6)s/12.03s ≈ 50.1% (基准含全部移动, 与统计口径一致)"
+    assert app._prog_lbl["text"] == "50.1%"
+    app._step_line_ctl(1)               # 行3 (第二条) -> 100%
+    app._update_play_progress()
+    assert float(app._prog_bar["value"]) == 100.0
+    assert app._prog_lbl["text"] == "100.0%"
+    app._reset_line()                   # 复位 -> 隐藏进度条
+    assert app._prog_bar.winfo_manager() != "pack"
+    app._stop_playback()
+
+
+def test_file_list_delete_selected(app, tmp_path):
+    """文件列表右键删除: 多选 MPF 删除, 当前文件被删后切换到剩余文件"""
+    app.file_items.clear()                 # 共享 fixture 残留清理
+    app._refresh_file_list()
+    mpf1 = tmp_path / "a.MPF"
+    mpf1.write_text("G01X10F1000\n", encoding="utf-8")
+    mpf2 = tmp_path / "b.MPF"
+    mpf2.write_text("G01X20F2000\n", encoding="utf-8")
+    apt = tmp_path / "a_I.aptsource"
+    apt.write_text("CUTTER/10.000,5.000,4.000,0.000,0.000,0.000,0.000\n"
+                   "TOOLNO/1,50.000\n", encoding="utf-8")
+    app.add_files([str(mpf1), str(mpf2), str(apt)])
+    assert len(app.file_items) == 3
+    # 多选两个 MPF 删除 (当前文件 a 在选中内)
+    app.file_listbox.selection_set(0, 1)
+    app._menu_delete_mpf()
+    assert str(mpf1) not in app.file_items
+    assert str(mpf2) not in app.file_items
+    assert str(apt) in app.file_items, "APT 不受 MPF 删除影响"
+    assert app._current_path is None, "MPF 全删后主视图清空 (APT 不设为主视图)"
+    # APT 也删除 -> 主视图清空
+    app.apt_listbox.selection_set(0)
+    app._menu_delete_apt()
+    assert not app.file_items
+    assert app.result is None
+    assert app.current_line is None
+
+
+def test_file_list_pair_apt_tool(app, tmp_path):
+    """文件列表右键配对: 「配对 APT 刀具」二级菜单列出所有 APT, 点击生效"""
+    app.file_items.clear()                 # 共享 fixture 残留清理
+    app._refresh_file_list()
+    mpf = tmp_path / "b.MPF"                       # 与 APT 不同名, 自动关联找不到
+    mpf.write_text("G01X10F1000\n", encoding="utf-8")
+    apt = tmp_path / "c_I.aptsource"
+    apt.write_text("CUTTER/10.000,5.000,4.000,0.000,0.000,0.000,0.000\n"
+                   "TOOLNO/1,50.000\n", encoding="utf-8")
+    apt2 = tmp_path / "d_I.aptsource"
+    apt2.write_text("CUTTER/20.000,6.000,5.000,0.000,0.000,0.000,0.000\n"
+                    "TOOLNO/2,60.000\n", encoding="utf-8")
+    app.add_files([str(mpf), str(apt), str(apt2)])
+    assert app.file_items[str(mpf)]["tool"] is None, "不同名应无自动关联刀具"
+    assert app.file_items[str(mpf)].get("partner") is None
+    # 二级菜单列出全部已加载 APT (每次弹出时重建)
+    app._rebuild_pair_menu()
+    labels = [app.pair_menu.entrycget(i, "label")
+              for i in range(app.pair_menu.index("end") + 1)]
+    assert labels == ["c_I.aptsource", "d_I.aptsource"], "子菜单应列出所有已加载 APT"
+    # MPF 列表选中 b.MPF, 点击子菜单第一项 (c_I.aptsource) 生效
+    app.file_listbox.selection_set(0)
+    app.pair_menu.invoke(0)
+    assert app.file_items[str(mpf)]["tool"] is not None, "配对后 MPF 应获得 APT 刀具"
+    assert app.file_items[str(mpf)]["tool"] == app.file_items[str(apt)]["tool"]
+    assert app.file_items[str(mpf)]["partner"] == str(apt)
+    assert app.tool is not None, "当前显示文件刀具应刷新"
+    assert app.tool_lbl["text"] != "-"
+    # 无 APT 时子菜单为禁用占位项
+    app.file_items.clear()
+    app._refresh_file_list()
+    app._rebuild_pair_menu()
+    assert app.pair_menu.entrycget(0, "state") == "disabled"
+
+
+def test_legend_hides_g0_when_absent(app, tmp_path):
+    """图例只显示程序实际存在的对照: 无 G0 移动则不显示 G0 项"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10F1000\nX20F2000\n", encoding="utf-8")   # 无 G0
+    app.open_file(str(p))
+    texts = [c.cget("text") for c in app.legend.winfo_children()
+             if c.winfo_class() == "TLabel"]
+    assert not any("G0" in t for t in texts), "无 G0 程序不应显示 G0 图例"
+    p2 = tmp_path / "t2.nc"
+    p2.write_text("G0X10\nG01X20F1000\n", encoding="utf-8")     # 有 G0
+    app.open_file(str(p2))
+    texts = [c.cget("text") for c in app.legend.winfo_children()
+             if c.winfo_class() == "TLabel"]
+    assert any("G0" in t for t in texts), "有 G0 程序应显示 G0 图例"
+
+
+def test_f_curve_single_polyline(app):
+    """F 曲线为单条连续折线: 不按 F 值分色, 无档位色块图例"""
+    cv = tk.Canvas(app, width=600, height=400)
+    data = [(1, 1.0, 1000.0), (2, 2.0, 2000.0), (3, 3.0, 500.0),
+            (4, 4.0, 2000.0)]                       # 跨多个 F 值
+    app._draw_f_curve(cv, data, 600, 400)
+    lines = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"]
+    assert len(lines) == 2, "双线绘制: 亮描边 + 主曲线 (清晰)"
+    main = [i for i in cv.find_withtag("curve") if cv.type(i) == "line"
+            and float(cv.itemcget(i, "width")) == 2.5]
+    assert len(main) == 1, "主曲线一条 (连续连接)"
+    assert len(cv.coords(main[0])) == 16, "4 数据点 -> 8 阶梯点 (16 坐标)"
+    rects = [i for i in cv.find_withtag("curve") if cv.type(i) == "rectangle"]
+    assert not rects, "不应有按 F 档位的色块图例"
     cv.destroy()
 
 
@@ -277,6 +597,104 @@ def test_tool_model_draws_and_toggles(app, tmp_path):
     app.show_tool.set(False)
     app.render()
     assert len(app.canvas.find_withtag("toolmodel")) == 0
+
+
+def test_dimension_arrows_point_outward(app):
+    """工程制图尺寸标注: 实心三角箭头, 左端朝左张开/右端朝右张开"""
+    cv = tk.Canvas(app, width=400, height=200)
+    app._dim_h(cv, 100, 100, 300, 100, "D20", "bottom")
+    polys = [i for i in cv.find_all() if cv.type(i) == "polygon"]
+    assert len(polys) == 2, "水平标注两端应为实心三角箭头"
+    left = right = None
+    for p in polys:
+        xs = cv.coords(p)[::2]
+        if any(abs(x - 100) < 1 for x in xs):      # 顶点在左端 x1=100
+            left = xs
+        elif any(abs(x - 300) < 1 for x in xs):    # 顶点在右端 x2=300
+            right = xs
+    assert left is not None and min(left) < 100 - 3, "左端箭头应朝左张开"
+    assert right is not None and max(right) > 300 + 3, "右端箭头应朝右张开"
+    # 垂直标注: 上端朝上张开/下端朝下张开
+    cv2 = tk.Canvas(app, width=200, height=400)
+    app._dim_v(cv2, 100, 80, 320, "L30", "right")
+    polys2 = [i for i in cv2.find_all() if cv2.type(i) == "polygon"]
+    assert len(polys2) == 2
+    top = bottom = None
+    for p in polys2:
+        ys = cv2.coords(p)[1::2]
+        if any(abs(y - 80) < 1 for y in ys):       # 顶点在上端 y1=80
+            top = ys
+        elif any(abs(y - 320) < 1 for y in ys):    # 顶点在下端 y2=320
+            bottom = ys
+    assert top is not None and min(top) < 80 - 3, "上端箭头应朝上张开"
+    assert bottom is not None and max(bottom) > 320 + 3, "下端箭头应朝下张开"
+    cv.destroy()
+    cv2.destroy()
+def test_tool_model_solid_body(app, tmp_path):
+    """3D 刀具模型: 实体填充 (无 stipple 半透明抖动), 轮廓加粗"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nX20Y30\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("ball", {"d": 10, "r": 5, "l": 30})
+    app.show_tool.set(True)
+    app.set_current_line(1)
+    bodies = [i for i in app.canvas.find_withtag("toolmodel")
+              if app.canvas.type(i) == "polygon"]
+    assert bodies, "应有刀具实体多边形"
+    assert app.canvas.itemcget(bodies[0], "stipple") == "", "实体不应半透明"
+    assert float(app.canvas.itemcget(bodies[0], "width")) >= 1, "轮廓线可见"
+
+
+def test_tool_model_no_oversize_when_large(app, tmp_path):
+    """3D 刀具模型: 直径投影 ≥24px 时不放大 (任何角度尺寸不超过几何投影),
+    不再因轴向投影趋零而突然放大 8 倍"""
+    from nc_viewer.geometry import VIEW_QUAT
+    app.state("normal")
+    app.geometry("1280x800+50+50")
+    app.update()
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nX20Y30\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("ball", {"d": 10, "r": 5, "l": 30})
+    app.show_tool.set(True)
+    app.set_current_line(1)
+    app.fit_view()
+    h_max = 30 * app.scale + 10           # 未放大的最大投影 (模型高)
+    for q in (VIEW_QUAT["XY"], VIEW_QUAT["XZ"], VIEW_QUAT["YZ"]):
+        app.quat = q
+        app.render()
+        bb = app.canvas.bbox("toolmodel")
+        assert bb, "模型应渲染"
+        w, hh = bb[2] - bb[0], bb[3] - bb[1]
+        assert max(w, hh) <= h_max, "大刀具不应放大 (实测 %.0f > %.0f)" % (
+            max(w, hh), h_max)
+    # 截面高光: 比实体浅 (非挖空感)
+    body = [i for i in app.canvas.find_withtag("toolmodel")
+            if app.canvas.type(i) == "polygon"][0]
+    body_fill = app.canvas.itemcget(body, "fill")
+    cirs = [i for i in app.canvas.find_withtag("toolmodel")
+            if app.canvas.type(i) == "polygon" and
+            app.canvas.itemcget(i, "fill") != body_fill]
+    for c in cirs:
+        assert app.canvas.itemcget(c, "fill") > body_fill, "截面应为高光 (比实体浅)"
+    app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 恢复默认视图
+
+
+def test_tool_model_zoomed_when_tiny(app, tmp_path):
+    """3D 刀具模型: 零件巨大使刀具直径投影 <24px 时放大到可见尺寸"""
+    app.state("normal")
+    app.geometry("1280x800+50+50")
+    app.update()
+    p = tmp_path / "t.nc"
+    p.write_text("G01X1000Y1000F1000\nX2000Y2000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("flat", {"d": 10, "r": 0, "l": 30})
+    app.show_tool.set(True)
+    app.set_current_line(1)
+    app.fit_view()
+    bb = app.canvas.bbox("toolmodel")
+    assert bb, "模型应渲染"
+    assert bb[2] - bb[0] >= 20, "小刀具应放大到可见尺寸"
 
 
 def test_tool_tip_anchored_at_position(app, tmp_path):
@@ -830,6 +1248,7 @@ def test_roll_mode_when_middle_press_off_path(app, tmp_path):
     p = tmp_path / "t.nc"
     p.write_text("G01X10Y0F1000\nG01X200Y0\n", encoding="utf-8")
     app.open_file(str(p))
+    app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 复位视图
     app.state("normal")
     app.geometry("1280x800+100+100")
     app.update()
@@ -877,6 +1296,7 @@ def test_click_pick_during_trace_views_without_moving_execution(app, tmp_path):
     p.write_text("\n".join("G01X%dF1000" % (10 * i) for i in range(1, 21)) + "\n",
                  encoding="utf-8")
     app.open_file(str(p))
+    app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 复位视图
     app.state("normal")
     app.geometry("1280x800+100+100")
     app.update()
@@ -907,6 +1327,7 @@ def test_click_pick_limited_to_drawn_in_trace(app, tmp_path):
     p.write_text("\n".join("G01X%dF1000" % (10 * i) for i in range(1, 21)) + "\n",
                  encoding="utf-8")
     app.open_file(str(p))
+    app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 复位视图
     app.state("normal")
     app.geometry("1280x800+100+100")
     app.update()
@@ -971,39 +1392,9 @@ def test_rotation_coalesces_refresh(app, tmp_path, monkeypatch):
     assert len(calls) <= 1, "连续 motion 不应逐事件渲染 (最多 1 次挂起)"
     app._rot_end(None)            # 释放: 立即最终全量渲染
     assert len(calls) >= 1
-
-
-def test_drag_decimation_restores_on_release(app, tmp_path):
-    """旋转拖动中大圆弧抽稀 (减点提速), 释放后恢复全量点数"""
-    from types import SimpleNamespace
-    p = tmp_path / "t.nc"
-    # 大圆弧 (r=50 半圆, 离散点多) + 直线; 首行定位移动避开原点起步
-    p.write_text("G01X10Y10F1000\nG02X110Y10I50J0F1000\nG01X110Y60\n",
-                 encoding="utf-8")
-    app.open_file(str(p))
-    app.state("normal")
-    app.geometry("1280x800+100+100")
-    app.update()
-    app.fit_view()
-
-    def total_points():
-        return sum(len(app.canvas.coords(i)) // 2
-                   for i in app.canvas.find_withtag("path"))
-
-    full = total_points()
-    app._rot_start(SimpleNamespace(x=100, y=100))
-    app._rot_move(SimpleNamespace(x=150, y=120))
-    app.update_idletasks()        # 执行合并的拖动帧
-    coarse = total_points()
-    app._rot_end(None)
-    restored = total_points()
-    assert coarse < full, "拖动中应抽稀"
-    assert restored == full, "释放后应恢复全量"
-
-
 def test_progress_dialog_during_load(app, tmp_path, monkeypatch):
-    """加载文件进度弹窗: 超延时任务弹窗, 进度单调推进, 结束后关闭"""
-    app._progress_delay = 0                      # 测试: 立即弹窗
+    """加载文件进度显示: 超延时任务显示, 进度单调推进, 结束后隐藏"""
+    app._progress_delay = 0                      # 测试: 立即显示
     p = tmp_path / "t.nc"
     p.write_text(NC_SMALL, encoding="utf-8")
     events = []
@@ -1019,22 +1410,37 @@ def test_progress_dialog_during_load(app, tmp_path, monkeypatch):
     fracs = [f for _, f in events]
     assert fracs == sorted(fracs), "进度应单调推进"
     assert fracs[-1] <= 1.0
-    assert app._prog is None, "加载结束后弹窗应关闭"
+    assert app._prog is None, "加载结束后进度应隐藏"
 
 
 def test_progress_dialog_mechanics(app):
-    """进度弹窗机制: 延迟内不创建/超延时才创建/标签与进度条更新/关闭销毁"""
-    app._progress_delay = 999                    # 快任务不弹窗
+    """进度内嵌显示机制: 延迟内不显示/超延时才显示/标签与进度条更新/结束隐藏"""
+    app._progress_delay = 999                    # 快任务不显示
     app._progress_begin()
     app._progress_update("x", 0.1)
     assert app._prog is None
-    app._progress_delay = 0                      # 超延时 -> 创建
+    assert app._prog_bar.winfo_manager() != "pack"
+    app._progress_delay = 0                      # 超延时 -> 显示
+    app.update()
     app._progress_update("读取 a", 0.3)
     assert app._prog is not None
     assert app._prog["lbl"]["text"] == "读取 a"
     assert float(app._prog["bar"]["value"]) == 30.0
+    # 内嵌在顶部栏右上角 (不弹独立窗口)
+    assert app._prog_lbl.winfo_manager() == "pack"
+    assert app._prog_bar.winfo_manager() == "pack"
+    assert not any(isinstance(c, tk.Toplevel) for c in app.winfo_children())
     app._progress_end()
     assert app._prog is None
+    assert app._prog_lbl.winfo_manager() != "pack"
+    assert app._prog_bar.winfo_manager() != "pack"
+
+
+def test_progressbar_style_is_dark(app):
+    """进度条深色样式: clam 默认进度条是浅色(白), 与深色弹窗不协调"""
+    s = ttk.Style(app)
+    assert s.lookup("TProgressbar", "troughcolor") == theme.INPUT_BG
+    assert s.lookup("TProgressbar", "background") == theme.ACCENT
 
 
 def test_playback_centers_current_line(app, tmp_path):
@@ -1325,6 +1731,7 @@ def test_trace_draws_progressively(app, tmp_path):
     p = tmp_path / "t.nc"
     p.write_text(NC_SMALL, encoding="utf-8")
     app.open_file(str(p))
+    app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 复位视图 (前序可能改过)
     app._trace_begin()
     assert len(app.canvas.find_withtag("path")) == 0
     app.set_current_line(1, animate=True)     # 第1段(原点出发)被跳过 -> 0 段

@@ -4,8 +4,9 @@ import math
 
 import pytest
 
-from nc_viewer.parser import (Move, compute_lift_plane, compute_segments,
-                              compute_stats, parse_nc)
+from nc_viewer.parser import (Move, compute_lift_plane, compute_machining_time,
+                              compute_segments, compute_stats, move_time_sec,
+                              parse_nc)
 
 
 # ---------- 基础线性移动 ----------
@@ -382,3 +383,67 @@ def test_segments_all_below_lift_is_one_segment():
 def test_segments_empty_program():
     r = parse_nc("\nM08\n")
     assert compute_segments(r.moves) == []
+
+
+# ---------- 加工时间 ----------
+def _mv(line, motion, start, end, feed, center=None, cw=None, plane="XY"):
+    return Move(line, None, motion, start, end, center, cw, plane, feed)
+
+
+def test_machining_time_straight():
+    """直线 G1: 100mm @ F1000 (mm/min) -> 6 秒"""
+    m = _mv(1, "G1", (0, 0, 0), (100, 0, 0), 1000.0)
+    assert abs(move_time_sec(m) - 6.0) < 1e-9
+
+
+def test_machining_time_g0_uses_rapid_speed():
+    """G0 快移按默认快移速度 20000 mm/min: 100mm -> 0.3 秒"""
+    m = _mv(1, "G0", (0, 0, 0), (100, 0, 0), None)
+    assert abs(move_time_sec(m) - 0.3) < 1e-9
+    assert abs(move_time_sec(m, g0_speed=10000.0) - 0.6) < 1e-9
+
+
+def test_machining_time_arc():
+    """G3 逆时针 1/4 圆弧 r=50: 弧长 50*pi/2, F1000 -> 4.712 秒"""
+    m = _mv(1, "G3", (50, 0, 0), (0, 50, 0), 1000.0,
+            center=(0, 0, 0), cw=False)
+    expect = 50 * math.pi / 2 / 1000.0 * 60.0
+    assert abs(move_time_sec(m) - expect) < 1e-6
+
+
+def test_machining_time_total_and_range():
+    """总时间 = 各移动之和; move_range 限定段内统计"""
+    moves = [_mv(1, "G1", (0, 0, 0), (100, 0, 0), 1000.0),     # 6s
+             _mv(2, "G1", (100, 0, 0), (300, 0, 0), 2000.0),   # 6s
+             _mv(3, "G0", (300, 0, 0), (400, 0, 0), None)]     # 0.3s
+    assert abs(compute_machining_time(moves) - 12.3) < 1e-9
+    assert abs(compute_machining_time(moves, move_range=(1, 1)) - 6.0) < 1e-9
+    assert abs(compute_machining_time(moves, move_range=(2, 2)) - 0.3) < 1e-9
+    assert compute_machining_time([]) == 0.0
+
+
+def test_machining_time_from_program_start():
+    """从程序开始点起算: start 跳过前导定位段 (从原点出发的移动不计入)"""
+    moves = [_mv(1, "G0", (0, 0, 0), (100, 100, 0), None),      # 前导定位 141mm
+             _mv(2, "G1", (100, 100, 0), (200, 100, 0), 1000.0)]  # 切削 6s
+    lead = math.hypot(100, 100) / 20000.0 * 60.0 + 6.0            # 前导 141.4mm 快移
+    assert abs(compute_machining_time(moves) - lead) < 1e-9, "含前导"
+    assert abs(compute_machining_time(moves, start=1) - 6.0) < 1e-9, "跳过前导"
+    # start 与 move_range 可组合
+    assert abs(compute_machining_time(moves, move_range=(1, 1), start=1) - 6.0) < 1e-9
+
+
+def test_machining_time_first_move_from_lift_plane():
+    """首条从机器原点 (0,0,0) 出发: 起点按抬刀平面 (0,0,首条终点Z) 计算,
+    不含从地面抬升的虚拟段 (只算水平进给距离)"""
+    m = _mv(1, "G1", (0, 0, 0), (100, 0, 50), 1000.0)      # 斜线 111.8mm
+    assert abs(move_time_sec(m) - 111.8 / 1000.0 * 60.0) < 1e-3, "普通口径"
+    assert abs(move_time_sec(m, lift_start=True) - 6.0) < 1e-9, "抬刀平面水平 100mm"
+    # 首条不从原点出发: 抬刀平面处理不影响
+    m2 = _mv(2, "G1", (10, 0, 0), (110, 0, 0), 1000.0)
+    assert move_time_sec(m2, lift_start=True) == move_time_sec(m2)
+    # compute_machining_time: 首个参与移动应用抬刀平面
+    moves = [m, _mv(2, "G1", (100, 0, 50), (200, 0, 50), 1000.0)]
+    assert abs(compute_machining_time(moves) - 12.0) < 1e-9, "首条 6s + 6s"
+    # start 之后的第一个移动也应用
+    assert abs(compute_machining_time(moves, start=1) - 6.0) < 1e-9

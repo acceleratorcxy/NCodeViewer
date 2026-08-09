@@ -33,4 +33,4 @@ docs/加工时间计算.md
 # Pillow 渲染实验原型 (不入库)
 原型-pillow/
 原型-qt/
-# Qt 离屏渲染实验分支已入库 (原型-embed/, 见 feature/embed-qt-offscreen)
+# Qt 离屏渲染实验版已入库 (原型-embed/, main 与 feature/embed-qt-offscreen 均跟踪)
