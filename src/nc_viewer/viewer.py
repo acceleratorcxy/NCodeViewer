@@ -30,10 +30,13 @@ from .geometry import (CUR_COLOR, CUR_LINE_COLOR, G0_COLOR, SEG_COLOR,
                        compensate_center, move_points_3d, orbit_rotate,
                        point_seg_dist_sq, project, quat_from_axis_angle,
                        quat_mul, quat_normalize, quat_rotate)
-from .parser import (compute_lift_plane, compute_segments, compute_stats,
-                     parse_nc)
+from .parser import (compute_lift_plane, compute_machining_time,
+                     compute_segments, compute_stats, move_time_sec, parse_nc)
 from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_full_profile,
                    tool_overall_height, tool_profile_points, tool_summary)
+
+
+_UNSET = object()              # 哨兵: _fill_stats 时间统计未显式指定
 
 
 def _sample_dir():
@@ -214,12 +217,14 @@ class NCViewer(tk.Tk):
         self._path_items = []
         self._poly_struct = None
         self._refresh_job = None         # 旋转/滚转刷新合并任务
-        self._drag_coarse = False        # 旋转拖动中圆弧抽稀 (减点提速)
         self._rot_moved = False
-        # 文件加载进度弹窗: 超过延时的加载才弹窗 (快任务防闪烁)
-        self._prog = None                # {"win","lbl","bar"} | None
+        # 文件加载进度: 超过延时的加载才在顶部栏显示 (快任务防闪烁)
+        self._prog = None                # {"lbl","bar"} | None
         self._prog_t0 = None
         self._progress_delay = 0.08
+        # 播放进度 (按加工时间): 可见移动时间前缀和 + 移动索引映射
+        self._time_prefix = None
+        self._time_pos = {}
 
         self._build_ui()
         self._bind_canvas()
@@ -249,6 +254,10 @@ class NCViewer(tk.Tk):
         self.tool_chk.pack(side="left", padx=(8, 0))
         self.file_lbl = ttk.Label(top, text="(未打开文件)")
         self.file_lbl.pack(side="left", padx=(12, 0))
+        # 加载进度内嵌 (顶部栏右上角): 超延时显示, 结束隐藏; 不弹独立窗口
+        self._prog_lbl = ttk.Label(top, text="", style="Panel.TLabel")
+        self._prog_bar = ttk.Progressbar(top, mode="determinate",
+                                         length=220, maximum=100)
 
         # 主体: 上=画布+侧栏, 下=代码列表
         body = ttk.PanedWindow(self, orient="vertical")
@@ -279,7 +288,7 @@ class NCViewer(tk.Tk):
                   style="Panel.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.file_listbox = tk.Listbox(fs_frame, width=26, exportselection=False,
                                        activestyle="dotbox",
-                                       selectmode="browse", relief="flat", highlightthickness=1,
+                                       selectmode="extended", relief="flat", highlightthickness=1,
                                        bg=theme.PANEL, fg=theme.TEXT,
                                        selectbackground=theme.SELECTION,
                                        selectforeground="#ffffff",
@@ -291,12 +300,18 @@ class NCViewer(tk.Tk):
         fsb.grid(row=2, column=1, sticky="ns")
         self.file_listbox.config(yscrollcommand=fsb.set)
         self.file_listbox.bind("<<ListboxSelect>>", self._on_file_select)
+        # 右键菜单: 删除所选(多选) / 配对 APT 刀具 (二级菜单列出全部已加载 APT)
+        self.file_menu = tk.Menu(self, tearoff=0)
+        self.file_menu.add_command(label="删除所选文件", command=self._menu_delete_mpf)
+        self.pair_menu = tk.Menu(self.file_menu, tearoff=0)
+        self.file_menu.add_cascade(label="配对 APT 刀具", menu=self.pair_menu)
+        self.file_listbox.bind("<Button-3>", self._popup_file_menu)
         # 下区: APT 源文件 (仅刀具信息)
         ttk.Label(fs_frame, text="APT 源文件 (刀具)", font=("", 9, "bold"),
                   style="Panel.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.apt_listbox = tk.Listbox(fs_frame, width=26, exportselection=False,
                                       activestyle="dotbox",
-                                      selectmode="browse", relief="flat", highlightthickness=1,
+                                      selectmode="extended", relief="flat", highlightthickness=1,
                                       bg=theme.PANEL, fg=theme.TEXT,
                                       selectbackground=theme.SELECTION,
                                       selectforeground="#ffffff",
@@ -307,6 +322,10 @@ class NCViewer(tk.Tk):
         asb.grid(row=4, column=1, sticky="ns")
         self.apt_listbox.config(yscrollcommand=asb.set)
         self.apt_listbox.bind("<<ListboxSelect>>", self._on_apt_select)
+        # 右键菜单: 删除所选 (APT 仅刀具信息, 无配对入口)
+        self.apt_menu = tk.Menu(self, tearoff=0)
+        self.apt_menu.add_command(label="删除所选文件", command=self._menu_delete_apt)
+        self.apt_listbox.bind("<Button-3>", self._popup_apt_menu)
         fs_frame.rowconfigure(2, weight=3)
         fs_frame.rowconfigure(4, weight=1)
         # 横向滚动条: 两个列表共享, 长文件名可横向查看
@@ -406,14 +425,14 @@ class NCViewer(tk.Tk):
         for r, (key, text) in enumerate((("x", "行程 X"), ("y", "行程 Y"),
                                          ("z", "行程 Z"), ("s", "S 转速"),
                                          ("f", "F 进给"), ("g", "G 次数"),
-                                         ("tool", "刀具"))):
+                                         ("tool", "刀具"), ("time", "加工时间"))):
             ttk.Label(st, text=text, style="Panel.TLabel",
                       font=theme.FONT_SMALL).grid(row=r, column=0, sticky="w")
             lbl = ttk.Label(st, text="-", font=theme.FONT_MONO, style="Panel.TLabel")
             lbl.grid(row=r, column=1, sticky="e")
             self.stats_labels[key] = lbl
         btns = ttk.Frame(st, style="Panel.TFrame")
-        btns.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        btns.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(2, 0))
         ttk.Button(btns, text="详情…", style=theme.BTN_ACCENT,
                    command=self.show_details).pack(side="left")
         ttk.Button(btns, text="F 曲线", command=self.show_f_curve).pack(side="left", padx=(8, 0))
@@ -777,36 +796,19 @@ class NCViewer(tk.Tk):
 
     # ------------- 文件 -------------
     def _progress_begin(self):
-        """开始一个可能较长的加载: 超过 _progress_delay 秒未完成则弹进度窗"""
+        """开始一个可能较长的加载: 超过 _progress_delay 秒未完成则显示内嵌进度"""
         self._prog_t0 = time.time()
         self._prog = None
 
     def _progress_create(self):
-        """创建加载进度弹窗 (模态, 居中于主窗口, 加载中禁止关闭)"""
-        win = tk.Toplevel(self)
-        win.title("加载文件")
-        win.configure(bg=theme.BG)
-        win.transient(self)
-        win.resizable(False, False)
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
-        frm = ttk.Frame(win, padding=14, style="Panel.TFrame")
-        frm.pack(fill="both", expand=True)
-        lbl = ttk.Label(frm, text="读取文件…", style="Panel.TLabel")
-        lbl.pack(anchor="w")
-        bar = ttk.Progressbar(frm, mode="determinate", length=380, maximum=100)
-        bar.pack(fill="x", pady=(8, 0))
-        win.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_reqwidth()) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_reqheight()) // 3
-        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        try:
-            win.grab_set()                # 模态: 加载期间不与主窗口交互
-        except tk.TclError:
-            pass                          # 窗口未映射等环境 (测试) 允许无 grab
-        return {"win": win, "lbl": lbl, "bar": bar}
+        """显示内嵌加载进度 (顶部栏右上角); 返回 {"lbl", "bar"}"""
+        self._prog_bar.pack(side="right")          # 条先 pack 居最右
+        self._prog_lbl.pack(side="right", padx=(0, 6))
+        self.update_idletasks()
+        return {"lbl": self._prog_lbl, "bar": self._prog_bar}
 
     def _progress_update(self, text, frac):
-        """更新加载进度; 首次超延时才创建弹窗; 仅重绘不处理输入 (加载原子完成)"""
+        """更新加载进度; 首次超延时才显示内嵌进度; 仅重绘不处理输入 (加载原子完成)"""
         if self._prog is None:
             if self._prog_t0 is None:
                 return
@@ -815,16 +817,13 @@ class NCViewer(tk.Tk):
             self._prog = self._progress_create()
         self._prog["lbl"].config(text=text)
         self._prog["bar"].config(value=max(0.0, min(1.0, frac)) * 100)
-        self._prog["win"].update_idletasks()
+        self.update_idletasks()
 
     def _progress_end(self):
-        """关闭进度弹窗 (幂等)"""
+        """隐藏内嵌加载进度 (幂等)"""
         if self._prog is not None:
-            try:
-                self._prog["win"].grab_release()
-                self._prog["win"].destroy()
-            except tk.TclError:
-                pass
+            self._prog_lbl.pack_forget()
+            self._prog_bar.pack_forget()
             self._prog = None
         self._prog_t0 = None
 
@@ -850,7 +849,7 @@ class NCViewer(tk.Tk):
     def add_files(self, paths):
         """解析并缓存多个文件, 刷新文件栏, 切换到第一个新加载文件。
 
-        分阶段 (读取/解析/离散刀路/载入界面) 驱动加载进度弹窗;
+        分阶段 (读取/解析/离散刀路/载入界面) 驱动顶部栏内嵌进度;
         读取失败的消息在加载结束关闭弹窗后统一弹出 (避免模态抢占)。
         """
         new_paths = []
@@ -977,6 +976,110 @@ class NCViewer(tk.Tk):
             self._highlight_partner(self.file_listbox, self.mp_paths,
                                     item.get("partner"))
 
+    # ------------- 文件列表右键菜单 -------------
+    def _popup_file_menu(self, e):
+        """右键: 未命中选中集时先单选点击项, 重建配对子菜单后弹出"""
+        idx = self.file_listbox.nearest(e.y)
+        if idx >= 0 and idx not in self.file_listbox.curselection():
+            self.file_listbox.selection_clear(0, "end")
+            self.file_listbox.selection_set(idx)
+        self._rebuild_pair_menu()
+        try:
+            self.file_menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.file_menu.grab_release()
+
+    def _rebuild_pair_menu(self):
+        """重建「配对 APT 刀具」子菜单: 列出当前全部已加载 APT"""
+        self.pair_menu.delete(0, "end")
+        if not self.apt_paths:
+            self.pair_menu.add_command(label="(无已加载 APT)", state="disabled")
+            return
+        for p in self.apt_paths:
+            self.pair_menu.add_command(label=os.path.basename(p),
+                                       command=lambda p=p: self._pair_apt_to_mpf(p))
+
+    def _popup_apt_menu(self, e):
+        idx = self.apt_listbox.nearest(e.y)
+        if idx >= 0 and idx not in self.apt_listbox.curselection():
+            self.apt_listbox.selection_clear(0, "end")
+            self.apt_listbox.selection_set(idx)
+        try:
+            self.apt_menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.apt_menu.grab_release()
+
+    def _menu_delete_mpf(self):
+        self._remove_files([self.mp_paths[i] for i in self.file_listbox.curselection()
+                            if 0 <= i < len(self.mp_paths)])
+
+    def _menu_delete_apt(self):
+        self._remove_files([self.apt_paths[i] for i in self.apt_listbox.curselection()
+                            if 0 <= i < len(self.apt_paths)])
+
+    def _remove_files(self, paths):
+        """从缓存删除文件并刷新; 当前文件被删则切换到剩余首个 MPF (全删则清空视图)"""
+        if not paths:
+            return
+        cur = self._current_path
+        for p in paths:
+            self.file_items.pop(p, None)
+        self._refresh_file_list()
+        if cur in paths:
+            if self.mp_paths:
+                self.set_current_file(self.mp_paths[0])
+            else:
+                self._clear_view()
+
+    def _clear_view(self):
+        """所有文件删除后清空主视图"""
+        self.result = None
+        self.lines = []
+        self.palette = {}
+        self.move_by_line = {}
+        self._disp3d = None
+        self._move_index = {}
+        self._current_path = None
+        self.current_line = None
+        self.tool = None
+        self._parsed_tool = None
+        self._segments = []
+        self._seg_of_line = {}
+        self._seg_checked = set()
+        self._time_prefix = None
+        self._time_pos = {}
+        self._stop_playback()
+        self._trace_active = False
+        self.file_lbl.config(text="(未打开文件)")
+        self.render()
+        self._fill_code()
+        self._refresh_tool_ui()
+
+    def _pair_apt_to_mpf(self, apt_path):
+        """手动配对: 把指定 APT 的刀具带给 MPF 列表中选中项"""
+        if apt_path not in self.file_items:
+            return
+        msel = self.file_listbox.curselection()
+        if not msel:
+            return
+        mpf_path = self.mp_paths[msel[0]]
+        tool = self.file_items[apt_path]["tool"]
+        if tool is None:
+            messagebox.showinfo("配对", "该 APT 文件未解析出刀具 (CUTTER/TOOLNO)")
+            return
+        item = self.file_items[mpf_path]
+        item["tool"] = tool
+        item["partner"] = apt_path
+        self.file_items[apt_path]["partner"] = mpf_path
+        # 当前显示程序即被配对项: 立即刷新刀具显示
+        if self._current_path == mpf_path:
+            self._parsed_tool = tool
+            self.tool = (self.custom_tool if self.custom_tool is not None else tool)
+            self._refresh_tool_ui()
+        # 双向高亮
+        self._highlight_partner(self.apt_listbox, self.apt_paths, apt_path)
+        self._highlight_partner(self.file_listbox, self.mp_paths, mpf_path)
+
     @staticmethod
     def _highlight_partner(box, paths, partner):
         """在另一列表中高亮关联文件"""
@@ -1044,6 +1147,8 @@ class NCViewer(tk.Tk):
         self._seg_checked = set()      # 勾选段随程序重建, 防上个程序的越界索引
         self.file_lbl.config(text=os.path.basename(path))
         self._recompute_segments()     # 段号映射 + 代码区填充 (含段号标注)
+        self._build_time_prefix()      # 播放进度时间轴 (按加工时间)
+        self._hide_play_progress()
         self._fill_legend()
         self._fill_stats()
         self._refresh_tool_ui()
@@ -1102,7 +1207,8 @@ class NCViewer(tk.Tk):
                 parts.append("ln")
             parts.append(line + "\n")
             parts.append(tag)
-        self.code.insert("end", *parts)
+        if parts:
+            self.code.insert("end", *parts)
         self.code.configure(state="disabled")
 
     @staticmethod
@@ -1112,7 +1218,9 @@ class NCViewer(tk.Tk):
     def _fill_legend(self):
         for w in self.legend.winfo_children():
             w.destroy()
-        items = [(G0_COLOR, "G0 快速移动")] + [
+        # 图例只显示程序实际存在的对照: 无 G0 移动则不显示 G0 项
+        has_g0 = any(m.motion == "G0" for m in self.result.moves)
+        items = ([(G0_COLOR, "G0 快速移动")] if has_g0 else []) + [
             (self.palette[f], f"F{format(f, '.4f').rstrip('0').rstrip('.')}")
             for f in self.result.feeds
         ]
@@ -1127,8 +1235,17 @@ class NCViewer(tk.Tk):
                 row=row, column=k * 2 + 1, sticky="w", padx=(0, 6))
 
     # ------------- 程序统计 -------------
-    def _fill_stats(self):
-        """刷新侧栏关键统计 (S/F 显示具体值; 段模式为勾选段内统计)"""
+    @staticmethod
+    def _fmt_time(seconds):
+        """秒 -> h:mm:ss 显示 (向上取整: 显示至少需要的加工时间)"""
+        seconds = max(0, int(math.ceil(seconds)))
+        return "%d:%02d:%02d" % (seconds // 3600, seconds % 3600 // 60,
+                                 seconds % 60)
+
+    def _fill_stats(self, time_override=_UNSET):
+        """刷新侧栏关键统计 (S/F 显示具体值; 段模式为勾选段内统计)。
+        time_override 为 (start_idx, end_idx) 时加工时间按该段统计
+        (画布拾取某刀路), 否则按勾选段/全程序。"""
         st = compute_stats(self.result, move_range=self._seg_filter)
         fmt = lambda v: f"{v:.3f}"
         self.stats_labels["x"].config(text=f"{fmt(st.x_min)} ~ {fmt(st.x_max)}")
@@ -1143,6 +1260,27 @@ class NCViewer(tk.Tk):
         self.stats_labels["g"].config(text=g_txt)
         self.stats_labels["tool"].config(
             text=tool_summary(self.tool) if self.tool else "-")
+        tr = self._seg_filter if time_override is _UNSET else time_override
+        # 含全部移动 (程序从第一条起算): 从原点出发的首条可能是真实加工,
+        # 前导定位段的显示跳过 (lead_skip) 不适用于时间统计
+        self.stats_labels["time"].config(text="-"
+            if not self.result else self._fmt_time(
+                compute_machining_time(self.result.moves, move_range=tr)))
+
+    def _set_pick_time(self, ln):
+        """画布拾取某刀路: 统计加工时间显示该刀路所在段的加工时间"""
+        if not self.result:
+            return
+        seg_idx = self._segment_for_line(ln)
+        if 0 < seg_idx <= len(self._segments):
+            seg = self._segments[seg_idx - 1]
+            self._fill_stats(time_override=(seg.start_idx, seg.end_idx))
+        else:
+            self._fill_stats(time_override=None)   # 段外行: 全程序/勾选段
+
+    def _reset_pick_time(self):
+        """取消拾取: 加工时间恢复默认 (勾选段/全程序)"""
+        self._fill_stats()
 
     def _refresh_tool_ui(self):
         """刷新刀具显示 (图例行 / 统计行 / 3D 模型开关 / 内嵌剖面图)"""
@@ -1243,11 +1381,20 @@ class NCViewer(tk.Tk):
 
     # ------------- F 进给趋势曲线 -------------
     def _f_curve_data(self):
-        """切削移动的 (行号, F) 序列 (G0 快移无 F, 不参与)"""
-        return [(m.line_number, m.feed) for m in self.result.moves if m.feed is not None]
+        """F 曲线数据: 切削移动的 (行号, 累计加工时间秒, F) 序列。
+        时间遍历全部移动 (含 G0 快移) 累加, 保证时间横轴连续; G0 无 F 不参与"""
+        if not self.result:
+            return []
+        out = []
+        t = 0.0
+        for m in self.result.moves:
+            t += move_time_sec(m)
+            if m.feed is not None:          # 切削移动 (G0 无 F)
+                out.append((m.line_number, t, m.feed))
+        return out
 
     def show_f_curve(self):
-        """二级窗口: F 进给随行号变化趋势 (按 F 档位着色, 可拉伸)"""
+        """二级窗口: F 进给随加工时间变化趋势 (横轴可切换行号, 可拉伸)"""
         if not self.result:
             return
         data = self._f_curve_data()
@@ -1257,96 +1404,289 @@ class NCViewer(tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"F 进给趋势 — {os.path.basename(self._current_path)}")
         win.configure(bg=theme.BG)
-        win.geometry("820x460")
-        win.minsize(480, 320)
+        win.geometry("860x480")
+        win.minsize(520, 340)
         cv = tk.Canvas(win, bg=theme.EDITOR_BG, highlightthickness=0)
         cv.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        # 横向滚动条: 时间轴缩放后平移视口 (拖动查看); 全览时隐藏
+        hsb = ttk.Scrollbar(win, orient="horizontal",
+                            command=self._curve_hscroll)
+        self._curve_hsb = hsb
+        # 底部配置栏: 横轴加工时间/行号切换 + 时间单位 (秒/分钟/小时)
+        ctl = ttk.Frame(win, style="Panel.TFrame")
+        ctl.pack(side="bottom", fill="x", padx=8, pady=(0, 6))
+        ttk.Label(ctl, text="横轴:", style="Panel.TLabel").pack(side="left")
+        self._curve_axis_var = tk.StringVar(value="time")
+        for text, val in (("加工时间", "time"), ("行号", "line")):
+            ttk.Radiobutton(ctl, text=text, variable=self._curve_axis_var,
+                            value=val, command=self._curve_axis_changed
+                            ).pack(side="left", padx=(4, 0))
+        ttk.Label(ctl, text="  单位:", style="Panel.TLabel").pack(side="left")
+        self._curve_unit_var = tk.StringVar(value="sec")
+        self._curve_unit_rbs = []
+        for text, val in (("秒", "sec"), ("分钟", "min"), ("小时", "hour")):
+            rb = ttk.Radiobutton(ctl, text=text, variable=self._curve_unit_var,
+                                 value=val, command=self._curve_axis_changed)
+            rb.pack(side="left", padx=(4, 0))
+            self._curve_unit_rbs.append(rb)
         self._curve_job = None
+        self._curve_cv = cv
+        self._curve_data = data
+        self._curve_view = None          # 时间轴视口 (t_lo, t_hi), None=全览
         cv.bind("<Configure>", lambda e: self._curve_redraw(cv, data, e))
-        self._draw_f_curve(cv, data, cv.winfo_width() or 804, cv.winfo_height() or 420)
+        cv.bind("<MouseWheel>", self._curve_wheel)
+        self._draw_f_curve(cv, data, cv.winfo_width() or 844,
+                           cv.winfo_height() or 420)
+        self._curve_scroll_update()
+
+    def _curve_axis_changed(self, coarse=False):
+        """横轴/单位切换或视口变化: 重绘并同步滚动条; coarse=拖动中轻量帧"""
+        self._curve_job = None           # 防抖回调已触发
+        self._draw_f_curve(self._curve_cv, self._curve_data,
+                           self._curve_cv.winfo_width() or 844,
+                           self._curve_cv.winfo_height() or 428,
+                           axis=self._curve_axis_var.get(),
+                           unit=self._curve_unit_var.get() if hasattr(
+                               self, "_curve_unit_var") else "sec",
+                           view=self._curve_view if self._curve_axis_var.get()
+                           == "time" else None,
+                           coarse=coarse)
+        self._curve_scroll_update()
+
+    def _curve_finalize(self):
+        """拖动停止后恢复精绘 (描边 + 全量抽稀)"""
+        self._curve_final_job = None
+        self._curve_axis_changed(coarse=False)
 
     def _curve_redraw(self, cv, data, e):
-        """窗口拉伸时 60ms 防抖重绘"""
+        """窗口拉伸时 60ms 防抖重绘 (保持当前横轴选择/单位/视口)"""
         if self._curve_job is not None:
             self.after_cancel(self._curve_job)
-        self._curve_job = self.after(60, lambda: self._draw_f_curve(cv, data, e.width, e.height))
+        axis = getattr(self, "_curve_axis_var", None)
+        unit = getattr(self, "_curve_unit_var", None)
+        self._curve_job = self.after(
+            60, lambda: self._draw_f_curve(
+                cv, data, e.width, e.height,
+                axis=axis.get() if axis else "time",
+                unit=unit.get() if unit else "sec",
+                view=self._curve_view if (axis and axis.get() == "time")
+                else None))
 
-    def _draw_f_curve(self, cv, data, W, H):
-        """按给定尺寸绘制 F 趋势图 (可独立于窗口尺寸测试/重绘)"""
+    def _curve_scroll_update(self):
+        """同步横向滚动条: 时间轴视口在全览内的位置; 全览/行号模式隐藏"""
+        sb = getattr(self, "_curve_hsb", None)
+        if sb is None or not self._curve_data:
+            return
+        if self._curve_axis_var.get() != "time":
+            sb.pack_forget()
+            return
+        T = self._curve_data[-1][1]
+        t_lo, t_hi = self._curve_view or (0.0, T)
+        w = t_hi - t_lo
+        shown = sb.winfo_manager() == "pack"
+        if T <= 0 or w >= T - 1e-9:
+            if shown:
+                sb.pack_forget()             # 全览: 隐藏滚动条
+        else:
+            sb.set(t_lo / T, t_hi / T)
+            if not shown:                    # 避免重复 pack 触发布局重算
+                sb.pack(side="bottom", fill="x", padx=8)
+
+    def _curve_wheel(self, e):
+        """滚轮横向缩放 (仅时间轴): 以鼠标 x 位置为锚缩放视口"""
+        if self._curve_axis_var.get() != "time" or not self._curve_data:
+            return
+        cv = self._curve_cv
+        W = cv.winfo_width()
+        if W < 50:                       # 未映射 (测试) 时回退默认宽度
+            W = 640
+        plot_w = W - 64 - 36
+        if plot_w <= 20:
+            return
+        T = self._curve_data[-1][1]
+        if T <= 0:
+            return
+        t_lo, t_hi = self._curve_view or (0.0, T)
+        frac = min(1.0, max(0.0, (e.x - 64) / plot_w))
+        t_at = t_lo + frac * (t_hi - t_lo)
+        factor = 1 / 1.25 if e.delta > 0 else 1.25   # 向上滚=放大(视口变窄)
+        nw = min(T, max(1.0, (t_hi - t_lo) * factor))
+        t_lo = t_at - frac * nw
+        t_hi = t_lo + nw
+        if t_lo < 0:
+            t_lo, t_hi = 0.0, nw
+        if t_hi > T:
+            t_hi, t_lo = T, T - nw
+        if (t_lo, t_hi) == (self._curve_view or (0.0, T)):
+            return                       # 视口未变化 (已到极限): 不调度重绘
+        self._curve_view = (t_lo, t_hi)
+        self._curve_schedule_redraw()
+
+    def _curve_schedule_redraw(self, coarse=False):
+        """视口变化防抖重绘: 事件风暴合并为一次重绘 (50ms 跟手)。
+        coarse=True (滚动条拖动): 轻量帧, 停止 300ms 后自动恢复精绘"""
+        job = getattr(self, "_curve_job", None)
+        if job is not None:
+            self.after_cancel(job)
+        fin = getattr(self, "_curve_final_job", None)
+        if fin is not None:
+            self.after_cancel(fin)
+            self._curve_final_job = None
+        if coarse:
+            self._curve_job = self.after(
+                50, lambda: self._curve_axis_changed(coarse=True))
+            self._curve_final_job = self.after(300, self._curve_finalize)
+        else:
+            self._curve_job = self.after(50, self._curve_axis_changed)
+
+    def _curve_hscroll(self, *a):
+        """横向滚动条拖动: 平移时间轴视口 (仅时间模式)"""
+        if self._curve_axis_var.get() != "time" or not self._curve_data:
+            return
+        T = self._curve_data[-1][1]
+        if T <= 0:
+            return
+        t_lo, t_hi = self._curve_view or (0.0, T)
+        w = t_hi - t_lo
+        if a[0] == "moveto":
+            t_lo = float(a[1]) * (T - w)
+        elif a[0] == "scroll":
+            n = int(a[1])
+            t_lo += n * (w * 0.9 if a[2] == "pages" else T / 100.0)
+        t_lo = max(0.0, min(T - w, t_lo))
+        self._curve_view = (t_lo, t_lo + w)
+        self._curve_schedule_redraw(coarse=True)   # 拖动: 轻量帧 + 停止后精绘
+
+    @staticmethod
+    def _nice_time_step(span_sec):
+        """按视口跨度 (秒) 选刻度间隔: 目标 4-8 档"""
+        for step in (1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600,
+                     7200, 18000, 36000, 72000, 180000):
+            if span_sec / step <= 8:
+                return step
+        return max(1.0, span_sec / 8)
+
+    @staticmethod
+    def _time_unit_div(unit):
+        return {"sec": 1.0, "min": 60.0, "hour": 3600.0}.get(unit, 1.0)
+
+    def _draw_f_curve(self, cv, data, W, H, axis="time", unit="sec", view=None,
+                      coarse=False):
+        """按给定尺寸绘制 F 趋势图 (可独立于窗口尺寸测试/重绘)。
+        data: [(行号, 累计加工时间秒, F)]; axis="time" 横轴为加工时间,
+        "line" 横轴为行号; unit 为时间单位 (sec/min/hour); view 为时间
+        视口 (t_lo, t_hi 秒), None=全览。余量充足 + 双线曲线保证清晰"""
         cv.delete("all")
         if not data:
             return
-        pad_l, pad_r, pad_t, pad_b = 52, 20, 30, 38
+        pad_l, pad_r, pad_t, pad_b = 64, 36, 40, 46
         plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
         if plot_w <= 20 or plot_h <= 20:
             return
-        lines = [ln for ln, _ in data]
-        feeds = [f for _, f in data]
+        feeds = [f for _, _, f in data]
         fmin, fmax = min(feeds), max(feeds)
         if fmax == fmin:
             fmax = fmin + 1.0
-        ln0, ln1 = lines[0], lines[-1]
-        if ln1 == ln0:
-            ln1 = ln0 + 1
+        div = self._time_unit_div(unit)
+        if axis == "line":
+            x0, x1 = data[0][0], data[-1][0]
+            fmt_x = lambda v: f"{v:.0f}"
+            x_label = "行号"
+            ticks = [x0 + (x1 - x0) * i / 7 for i in range(8)]
+        else:
+            t0, t1 = view if view else (0.0, data[-1][1])
+            if t1 <= t0:
+                t1 = t0 + 1.0
+            x0, x1 = t0 / div, t1 / div          # 单位化坐标
+            u_name = {"sec": "秒", "min": "分钟", "hour": "小时"}.get(unit, "秒")
+            x_label = f"加工时间 ({u_name})"
+            fmt_x = lambda v: f"{v:g}"
+            step = self._nice_time_step(t1 - t0) / div
+            ticks = []
+            k = math.ceil(x0 / step - 1e-9) * step
+            while k <= x1 + 1e-9:
+                ticks.append(k)
+                k += step
+        if x1 == x0:
+            x1 = x0 + 1.0
         fmt_axis = lambda v: f"{v:.0f}" if v >= 100 else f"{v:g}"
 
-        def sx(x):
-            return pad_l + (x - ln0) / (ln1 - ln0) * plot_w
+        def sx(x_unit):
+            return pad_l + (x_unit - x0) / (x1 - x0) * plot_w
 
         def sy(v):
             return pad_t + (1 - (v - fmin) / (fmax - fmin)) * plot_h
 
-        # 网格 + 刻度 (每轴 6 档)
+        # 网格 + 刻度: 纵 6 档; 横按刻度间隔 (视口缩放时自动加密/变稀)
         for i in range(6):
             v = fmin + (fmax - fmin) * i / 5
             y = sy(v)
             cv.create_line(pad_l, y, W - pad_r, y, fill=theme.BORDER, tags="grid")
-            cv.create_text(pad_l - 8, y, text=fmt_axis(v), anchor="e",
+            cv.create_text(pad_l - 10, y, text=fmt_axis(v), anchor="e",
                            fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
-        for i in range(6):
-            x = ln0 + (ln1 - ln0) * i / 5
+        for x in ticks:
             xx = sx(x)
             cv.create_line(xx, pad_t, xx, H - pad_b, fill=theme.BORDER, tags="grid")
-            cv.create_text(xx, H - pad_b + 8, text=f"{x:.0f}", anchor="n",
+            cv.create_text(xx, H - pad_b + 10, text=fmt_x(x), anchor="n",
                            fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
-        # 坐标轴与标题
+        # 坐标轴与轴标签
         cv.create_line(pad_l, pad_t, pad_l, H - pad_b, fill=theme.TEXT_DIM)
         cv.create_line(pad_l, H - pad_b, W - pad_r, H - pad_b, fill=theme.TEXT_DIM)
-        cv.create_text(W // 2, H - 6, text="行号", fill=theme.TEXT, font=theme.FONT_UI)
-        cv.create_text(6, pad_t, text="F 进给", anchor="w", fill=theme.TEXT, font=theme.FONT_UI)
-        # min/max F 参考虚线
+        cv.create_text(W // 2, H - 8, text=x_label, fill=theme.TEXT,
+                       font=theme.FONT_UI)
+        cv.create_text(8, pad_t - 16, text="F 进给", anchor="w",
+                       fill=theme.TEXT, font=theme.FONT_UI)
+        # min/max F 参考虚线 + 标注
         for v in (fmin, fmax):
             y = sy(v)
             cv.create_line(pad_l, y, W - pad_r, y, fill=theme.TEXT_DIM, dash=(3, 3))
-            cv.create_text(W - pad_r - 4, y - 4, text=f"F{fmt_axis(v)}", anchor="e",
-                           fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
-        # 折线: 相邻同 F 合并为折线, 按 F 档位着色
-        palette = self.palette
-        polylines = []  # [(color, [x1, y1, x2, y2, ...])]
-        for ln, f in data:
-            x, y = sx(ln), sy(f)
-            key = palette.get(f, "#ffffff")
-            if polylines and polylines[-1][0] == key:
-                polylines[-1][1].extend([x, y])
-            else:
-                polylines.append([key, [x, y]])
-        for color, pts in polylines:
-            if len(pts) >= 4:
-                cv.create_line(pts, fill=color, width=2, joinstyle="round", tags="curve")
-            else:
-                cv.create_oval(pts[0] - 3, pts[1] - 3, pts[0] + 3, pts[1] + 3,
-                               fill=color, outline="", tags="curve")
-        # 档位图例 (右上角, 不压数据区)
-        feeds_order = self.result.feeds if self.result else []
-        ly = pad_t + 10
-        for f in feeds_order:
-            col = palette.get(f, "#ffffff")
-            cv.create_rectangle(W - pad_r - 140, ly, W - pad_r - 128, ly + 10,
-                                fill=col, outline="")
-            cv.create_text(W - pad_r - 124, ly + 5,
-                           text=f"F{format(f, '.4f').rstrip('0').rstrip('.')}",
-                           anchor="w", fill=theme.TEXT, font=theme.FONT_SMALL)
-            ly += 18
+            cv.create_text(W - pad_r - 4, y - 5, text=f"F{fmt_axis(v)}",
+                           anchor="e", fill=theme.TEXT_DIM, font=theme.FONT_SMALL)
+        # 抽稀: 每像素最多 1 个数据点 (阶梯线每点生成 2 个坐标点, Tk
+        # create_line 大点数极慢; 缩放后视口内点少自然不抽稀保持精确;
+        # 拖动粗绘时抽稀加倍, 渲染更快)
+        max_pts = max(16, plot_w // (2 if coarse else 1))
+        draw = data
+        if len(data) > max_pts:
+            step = math.ceil(len(data) / max_pts)
+            draw = data[::step]
+            if draw[0] != data[0]:
+                draw = [data[0]] + draw
+            if draw[-1] != data[-1]:
+                draw = draw + [data[-1]]
+        # 阶梯线: F 阶跃变化, 每个 F 值保持水平线段到下一数据点时间,
+        # 然后垂直跳变到新 F (无斜线); 精绘双线 (亮色描边 + 主色),
+        # 拖动粗绘仅主曲线 (描边是渲染大头, 拖动时省去)
+        pts = []
+        for i in range(len(draw) - 1):
+            _ln, t, f = draw[i]
+            _ln2, t2, _f2 = draw[i + 1]
+            xv = (_ln if axis == "line" else t / div)
+            xv2 = (_ln2 if axis == "line" else t2 / div)
+            if i == 0:
+                pts.extend([sx(xv), sy(f)])    # 首个水平段起点
+            pts.extend([sx(xv2), sy(f)])       # 水平延伸到下一数据点时间
+            pts.extend([sx(xv2), sy(_f2)])     # 垂直跳变到新 F
+        _ln, t, f = draw[-1]
+        xv = (_ln if axis == "line" else t / div)
+        pts.extend([sx(xv), sy(f)])            # 末点收尾
+        if len(pts) >= 4:
+            if not coarse:
+                cv.create_line(pts, fill="#7fb3d9", width=5, joinstyle="round",
+                               tags="curve")
+            cv.create_line(pts, fill=theme.ACCENT, width=2.5, joinstyle="round",
+                           tags="curve")
+        else:
+            cv.create_oval(pts[0] - 3, pts[1] - 3, pts[0] + 3, pts[1] + 3,
+                           fill=theme.ACCENT, outline="#7fb3d9", tags="curve")
+        # 点数少 (<=200) 时标出数据点
+        if 0 < len(draw) <= 200:
+            for _ln, t, f in draw:
+                xv = (_ln if axis == "line" else t / div)
+                x, y = sx(xv), sy(f)
+                cv.create_oval(x - 2.5, y - 2.5, x + 2.5, y + 2.5,
+                               fill=theme.ACCENT, outline="#7fb3d9",
+                               tags="curve")
 
     # ------------- 刀具 3D 模型 -------------
     def _tool_model_points(self, tool):
@@ -1378,20 +1718,19 @@ class NCViewer(tk.Tk):
         return pts
 
     def _draw_tool_model(self):
-        """画布内绘制刀具旋转 3D 模型 (半透明实体, 刀尖对刀)"""
+        """画布内绘制刀具旋转 3D 模型 (实心实体, 刀尖对刀)"""
         if not self.show_tool.get() or not self.tool or not self.result:
             return
         tool = self.tool
         pos = (self.result.position_at_line(self.current_line)
                if self.current_line else (0.0, 0.0, 0.0))
-        h = tool_overall_height(tool)
-        # 最小可见尺寸: 投影高 <24px 时以刀尖为锚放大 (刀具相对零件很小)
-        a0, b0 = project(pos, self.quat)
-        a1, b1 = project((pos[0], pos[1], pos[2] + h), self.quat)
-        px_h = abs(b1 - b0) * self.scale
+        max_r = max(r for r, _ in tool_full_profile(tool))
+        # 最小可见尺寸: 直径投影 <24px 时以刀尖为锚放大。旋转体任意角度
+        # 投影宽度 = 直径 (与视角无关), 避免轴向投影趋零时突然放大 8 倍
+        px_w = 2 * max_r * self.scale
         factor = 1.0
-        if 0 < px_h < 24:
-            factor = min(24.0 / px_h, 8.0)
+        if 0 < px_w < 24:
+            factor = min(24.0 / px_w, 6.0)
         for kind, pts in self._tool_model_points(tool):
             screen = []
             for x, y, z in pts:
@@ -1406,10 +1745,15 @@ class NCViewer(tk.Tk):
                                         fill=CUR_COLOR, outline="#000000",
                                         tags="toolmodel")
             elif kind == "body":
-                # 半透明实体 (stipple 抖动填充)
+                # 实体 (凝实): 深灰实心填充 + 亮轮廓, 不再半透明飘浮
+                self.canvas.create_polygon(screen, fill="#63636b",
+                                           outline="#d4d4dc", width=2,
+                                           tags="toolmodel")
+            elif kind == "cir":
+                # 关键截面: 投影为椭圆, 浅色高光填充增强立体 (深色会像挖空)
                 self.canvas.create_polygon(screen, fill="#9a9aa2",
-                                           outline="#c8c8c8", width=1,
-                                           stipple="gray50", tags="toolmodel")
+                                           outline="#c8c8d0", width=1,
+                                           tags="toolmodel")
             elif len(screen) >= 2:
                 kw = {"fill": "#8a8a8a", "tags": "toolmodel"}
                 if kind == "axis":
@@ -1480,9 +1824,9 @@ class NCViewer(tk.Tk):
         self._dim_h(cv, sx(-max_r), sy(y_max), sx(max_r), sy(y_max),
                     f"D{tool_summary(tool).split('D')[1].split()[0]}", "bottom")
         # 刃长标注 (右侧) 与总长标注 (左侧)
-        self._dim_v(cv, sx(max_r) + 20, sy(0), sx(max_r) + 20, sy(l), f"L{l:g}", "right")
+        self._dim_v(cv, sx(max_r), sy(0), sy(l), f"L{l:g}", "right")
         if h > l + 1e-9:
-            self._dim_v(cv, sx(0) - 20, sy(0), sx(0) - 20, sy(h), f"H{h:g}", "left")
+            self._dim_v(cv, sx(0), sy(0), sy(h), f"H{h:g}", "left")
         # 特征标注 (圆角/球头/顶角/锥角)
         kind = tool.kind
         if kind == "ball":
@@ -1502,27 +1846,39 @@ class NCViewer(tk.Tk):
         cv.create_text(W / 2, 14, text=tool_summary(tool),
                        fill=theme.TEXT, font=theme.FONT_UI)
 
-    def _dim_h(self, cv, x1, y, x2, y2, text, side):
-        """水平尺寸线 + 45° 端刻线 + 标注"""
-        yy = y + 26 if side == "bottom" else y - 26
-        cv.create_line(x1, yy, x2, yy, fill=theme.TEXT_DIM)
-        for xx in (x1, x2):
-            cv.create_line(xx, yy - 5, xx, yy + 5, fill=theme.TEXT_DIM)
-            cv.create_line(xx, yy - 5, xx - 4, yy, fill=theme.TEXT_DIM)
-            cv.create_line(xx, yy + 5, xx - 4, yy, fill=theme.TEXT_DIM)
-        cv.create_text((x1 + x2) / 2, yy - 12 if side == "bottom" else yy + 12,
-                       text=text, fill=theme.TEXT, font=theme.FONT_MONO)
+    def _dim_arrow(self, cv, x, y, dx, dy, size=7.0):
+        """实心三角箭头 (工程制图): 尖端在 (x,y), 沿 (dx,dy) 方向张开 (半角 30°),
+        即尖端朝 (dx,dy) 指向端部, 张开端在外侧"""
+        ang = math.atan2(dy, dx)
+        half = 0.52
+        pts = [(x, y),
+               (x + size * math.cos(ang - half), y + size * math.sin(ang - half)),
+               (x + size * math.cos(ang + half), y + size * math.sin(ang + half))]
+        cv.create_polygon(pts, fill=theme.TEXT_DIM, outline=theme.TEXT_DIM)
 
-    def _dim_v(self, cv, x, y1, y2, y3, text, side):
-        """垂直尺寸线 + 端刻线 + 标注"""
-        xx = x + 20 if side == "right" else x - 20
-        cv.create_line(xx, y1, xx, y2, fill=theme.TEXT_DIM)
-        for yy in (y1, y2):
-            cv.create_line(xx - 5, yy, xx + 5, yy, fill=theme.TEXT_DIM)
-            cv.create_line(xx - 5, yy, xx, yy - 4, fill=theme.TEXT_DIM)
-            cv.create_line(xx + 5, yy, xx, yy - 4, fill=theme.TEXT_DIM)
-        cv.create_text(xx + 12 if side == "right" else xx - 12, (y1 + y2) / 2,
-                       text=text, fill=theme.TEXT, font=theme.FONT_MONO)
+    def _dim_h(self, cv, x1, y1, x2, y2, text, side):
+        """水平尺寸标注 (工程制图): 尺寸界线从轮廓引出, 尺寸线两端实心
+        箭头朝外 (左端朝左/右端朝右), 文字在尺寸线上方居中"""
+        yy = max(y1, y2) + 26 if side == "bottom" else min(y1, y2) - 26
+        cv.create_line(x1, y1, x1, yy, fill=theme.TEXT_DIM)   # 界线
+        cv.create_line(x2, y2, x2, yy, fill=theme.TEXT_DIM)
+        cv.create_line(x1, yy, x2, yy, fill=theme.TEXT_DIM)   # 尺寸线
+        self._dim_arrow(cv, x1, yy, -1, 0)                    # 左端朝左
+        self._dim_arrow(cv, x2, yy, 1, 0)                     # 右端朝右
+        cv.create_text((x1 + x2) / 2, yy - 10, text=text,
+                       fill=theme.TEXT, font=theme.FONT_MONO)
+
+    def _dim_v(self, cv, x, y1, y2, text, side):
+        """垂直尺寸标注 (工程制图): 尺寸界线从轮廓引出, 实心箭头朝外
+        (上端朝上/下端朝下), 文字在尺寸线左侧"""
+        xx = x + 24 if side == "right" else x - 24
+        cv.create_line(x, y1, xx, y1, fill=theme.TEXT_DIM)    # 界线
+        cv.create_line(x, y2, xx, y2, fill=theme.TEXT_DIM)
+        cv.create_line(xx, y1, xx, y2, fill=theme.TEXT_DIM)   # 尺寸线
+        self._dim_arrow(cv, xx, y1, 0, -1)                    # 上端朝上
+        self._dim_arrow(cv, xx, y2, 0, 1)                     # 下端朝下
+        cv.create_text(xx - 10, (y1 + y2) / 2, text=text, anchor="e",
+                       fill=theme.TEXT, font=theme.FONT_MONO)
 
     # ------------- 刀具自定义 -------------
     def show_tool_setup(self):
@@ -1717,12 +2073,11 @@ class NCViewer(tk.Tk):
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
         show_g0 = self.show_g0.get()
         palette = self.palette
-        coarse = self._drag_coarse        # 旋转/滚转拖动中: 圆弧抽稀提速
         # 预计算四元数系数 (省去每点 2 倍乘)
         a2, b2, c2 = 2.0 * y, 2.0 * z, 2.0 * x
 
         key = (id(self.result), w, x, y, z, self._seg_filter, show_g0,
-               self._lead_skip, coarse)
+               self._lead_skip)
         if self._proj_cache is not None and self._proj_cache[0] == key:
             # 四元数/过滤未变: 复用缓存投影, 仅重算缩放偏移 (缩放提速)
             polylines = []
@@ -1736,40 +2091,51 @@ class NCViewer(tk.Tk):
             # 内联四元数投影 + 相邻同色且连续的移动合并为折线(扁平坐标列表)
             polylines = []
             base_store = []      # 缓存: 不含缩放偏移的世界投影坐标
-            for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
-                if i < self._lead_skip:      # 从原点出发的起始进给段不显示
-                    continue
-                if self._move_filtered(i):   # 段模式: 只显示勾选段
-                    continue
-                if m.motion == "G0" and not show_g0:
-                    continue
-                color = color_of_move(m, palette)
-                if coarse and len(pts3d) > 4:   # 拖动中抽稀: 圆弧减半采样
-                    pts3d = pts3d[::2] + [pts3d[-1]]
-                coords = []
-                base = []
-                ap = coords.append
-                bp = base.append
-                for px, py, pz in pts3d:
-                    tx = a2 * pz - b2 * py
-                    ty = b2 * px - c2 * pz
-                    tz = c2 * py - a2 * px
-                    vx = px + w * tx + y * tz - z * ty
-                    vy = py + w * ty + z * tx - x * tz
-                    ap(vx * scale + ox)
-                    ap(-vy * scale + oy)
-                    bp(vx)
-                    bp(vy)
-                # 相邻且连续(共享端点)的同色移动才合并折线; 段过滤产生的
-                # 间隙处必须另起新线, 否则会画出幻影连接线
-                if (polylines and polylines[-1][0] == color
-                        and polylines[-1][1][-2:] == coords[:2]):
-                    polylines[-1][1].extend(coords[2:])
-                    base_store[-1][1].extend(base[2:])
-                else:
-                    polylines.append([color, coords])
-                    base_store.append([color, base])
-            self._proj_cache = (key, base_store)
+            moves = self.result.moves
+            disp3d = self._disp3d
+            n_moves = len(moves)
+            seg_filter = self._seg_filter
+            lead = self._lead_skip
+            # 快路径: 无段过滤/全勾选时省去每次 _move_filtered 调用 (25k 次)
+            if seg_filter is not None and not seg_filter:
+                base_store = []              # 空过滤: 无刀路可画
+            else:
+                check_seg = (seg_filter is not None)
+                for i in range(lead, n_moves):
+                    m = moves[i]
+                    if m.motion == "G0" and not show_g0:
+                        continue
+                    if check_seg:
+                        if not any(lo <= i <= hi for lo, hi in seg_filter):
+                            continue
+                    pts3d = disp3d[i]
+                    color = color_of_move(m, palette)
+                    coords = []
+                    base = []
+                    ap = coords.append
+                    bp = base.append
+                    for px, py, pz in pts3d:
+                        tx = a2 * pz - b2 * py
+                        ty = b2 * px - c2 * pz
+                        tz = c2 * py - a2 * px
+                        vx = px + w * tx + y * tz - z * ty
+                        vy = py + w * ty + z * tx - x * tz
+                        ap(vx * scale + ox)
+                        ap(-vy * scale + oy)
+                        bp(vx)
+                        bp(vy)
+                    # 相邻且连续(共享端点)的同色移动才合并折线; 段过滤产生的
+                    # 间隙处必须另起新线, 否则会画出幻影连接线
+                    if (polylines and polylines[-1][0] == color
+                            and polylines[-1][1][-2:] == coords[:2]):
+                        polylines[-1][1].extend(coords[2:])
+                        base_store[-1][1].extend(base[2:])
+                    else:
+                        polylines.append([color, coords])
+                        base_store.append([color, base])
+            # 旋转拖动中 quat 每帧变化, 缓存命中不了, 不写 (省 25k 条坐标拷贝)
+            if self._rot_data is None:
+                self._proj_cache = (key, base_store)
 
         polylines = [pl for pl in polylines if len(pl[1]) >= 4]
         # 结构未变 (同文件/过滤/G0/抽稀档位): 复用画布图元仅 coords 更新,
@@ -1789,13 +2155,16 @@ class NCViewer(tk.Tk):
             self._path_items = items
             self._poly_struct = struct
 
-        # 标记类图元数量小, 删除重建
+        # 标记类图元数量小, 删除重建; 旋转拖动中跳过 (每帧重建 ~15ms,
+        # 刀路保持完整, 标记在释放后的最终帧恢复)
         self.canvas.delete("axes", "cur", "curseg", "toolmodel")
-        self._draw_axes()
-        self._draw_current()
-        self._draw_tool_model()
-        self._place_legend()
-        self.status.config(text=self._status_text())
+        if self._rot_data is None:
+            self._draw_axes()
+            self._draw_current()
+            self._draw_tool_model()
+            self.status.config(text=self._status_text())
+        # 图例窗口项只在画布尺寸变化时重贴 (_on_canvas_configure),
+        # 每次重建 ~12ms 是拖动帧率杀手
 
     def _place_legend(self):
         """在画布右上角重建漂浮图例窗口项 (先清旧项防重复)"""
@@ -1832,10 +2201,14 @@ class NCViewer(tk.Tk):
 
         # 当前段高亮 + 加工方向箭头 (前导跳过段/被段过滤的移动不高亮, 防残留)
         m = self.move_by_line.get(self.current_line)
-        if m is not None and not (m.motion == "G0" and not self.show_g0.get()):
-            idx = self._move_index[id(m)]
-            if idx < self._lead_skip or self._move_filtered(idx):
-                m = None
+        idx = None
+        if m is not None:
+            if m.motion == "G0" and not self.show_g0.get():
+                m = None                 # 隐藏 G0 不高亮 (idx 不参与)
+            else:
+                idx = self._move_index[id(m)]
+                if idx < self._lead_skip or self._move_filtered(idx):
+                    m = None
         if m is not None:
             pts = [self.world_to_canvas(*project(p, q)) for p in self._disp3d[idx]]
             if len(pts) >= 2:
@@ -1910,12 +2283,15 @@ class NCViewer(tk.Tk):
     def _pan_start(self, e):
         # 记录起点、原始偏移、上一次位置(用于增量位移)
         self._pan_data = (e.x, e.y, self.offset[0], self.offset[1], e.x, e.y)
+        self._pan_moved = False          # 首次真正移动时再切粗图元 (单击不切)
 
     def _pan_move(self, e):
         if not self._pan_data:
             return
         sx, sy, ox, oy, px, py = self._pan_data
         dx, dy = e.x - px, e.y - py
+        if not self._pan_moved and (dx or dy):
+            self._pan_moved = True
         # 增量位移全部图元(原生 C 操作, 远快于重绘), 同时更新偏移供下次缩放重绘
         self.canvas.move("all", dx, dy)
         # 漂浮图例窗口项补偿: 保持画布右上角固定
@@ -1935,6 +2311,7 @@ class NCViewer(tk.Tk):
             self._draw_crosshair(*self.world_to_canvas(a, b))
 
     def _pan_end(self, e):
+        moved = self._pan_data is not None and self._pan_data[0] != self._pan_data[1]
         if self._pan_data:
             sx, sy = self._pan_data[0], self._pan_data[1]
             if max(abs(e.x - sx), abs(e.y - sy)) <= self.CLICK_MAX_MOVE_PX:
@@ -1953,6 +2330,7 @@ class NCViewer(tk.Tk):
                 self._clear_current()
             return
         ln = self.result.moves[idx].line_number
+        self._set_pick_time(ln)          # 统计加工时间显示该刀路所在段时间
         if self._trace_active:
             self._view_line(ln)
         else:
@@ -1968,6 +2346,7 @@ class NCViewer(tk.Tk):
     def _cancel_view(self):
         """取消查看行 (轨迹模式点空白): 清除查看高亮, 字段回到执行位置"""
         self.code.tag_remove("viewline", "1.0", "end")
+        self._reset_pick_time()           # 加工时间恢复默认 (勾选段/全程序)
         if self.current_line is not None:
             self._update_pos_info(self.current_line)
 
@@ -1978,6 +2357,7 @@ class NCViewer(tk.Tk):
         self._draw_tool_model()           # 无当前行时刀具模型回退到原点显示
         self.code.tag_remove("cur", "1.0", "end")
         self.code.tag_remove("viewline", "1.0", "end")
+        self._reset_pick_time()           # 加工时间恢复默认 (勾选段/全程序)
         for key in ("X", "Y", "Z", "S", "F", "G", "行", "段", "本行"):
             self._set_field(self.pos_fields[key], "-")
         self.loc_entry.delete(0, "end")
@@ -2068,7 +2448,6 @@ class NCViewer(tk.Tk):
         self._rot_center = c
         self._rot_data = (e.x, e.y)   # 记录上一鼠标位置, 用于计算增量拖动
         self._rot_moved = False
-        self._drag_coarse = True      # 拖动中抽稀绘制 (释放后恢复全量)
 
     def _rot_move(self, e):
         if self._rot_data is None:
@@ -2117,7 +2496,6 @@ class NCViewer(tk.Tk):
         moved = self._rot_moved
         self._rot_data = None
         self._rot_moved = False
-        self._drag_coarse = False               # 恢复全量绘制
         if self._refresh_job is not None:
             self.after_cancel(self._refresh_job)
             self._refresh_job = None
@@ -2126,6 +2504,7 @@ class NCViewer(tk.Tk):
 
     def _on_wheel(self, e):
         factor = 1.2 if e.delta > 0 else 1 / 1.2
+        # 滚轮缩放: canvas.scale 原位缩放全部图元 (C 级操作), 刀路保持完整
         self.zoom_at(factor, (e.x, e.y))
 
     # ------------- 行定位 -------------
@@ -2457,6 +2836,7 @@ class NCViewer(tk.Tk):
                                      self._segments[i].end_idx) for i in sel]
         else:
             self._seg_filter = None
+        self._build_time_prefix()      # 段过滤变化后重建播放进度时间轴
         if self.result:
             self._fill_stats()            # 段模式: 统计随勾选段刷新
             if refresh:
@@ -2507,6 +2887,61 @@ class NCViewer(tk.Tk):
             self._set_segment(n - 1)
 
     # ------------- 逐行运行 (播放控制条) -------------
+    # ------------- 播放进度 (按加工时间, 顶部栏右上角进度条) -------------
+    def _build_time_prefix(self):
+        """构建播放进度时间轴: 移动(段过滤外)的加工时间前缀和, 与统计口径一致
+        (含从原点出发的首条, 前导定位段的显示跳过不影响时间)。
+        _time_prefix[k] = 前 k 个移动累计秒; _time_pos[移动索引] = 序号"""
+        self._time_prefix = None
+        self._time_pos = {}
+        if not self.result or not self.result.moves:
+            return
+        moves = self.result.moves
+        acc = [0.0]
+        pos = {}
+        first = True
+        for i, m in enumerate(moves):
+            if self._move_filtered(i):
+                continue
+            acc.append(acc[-1] + move_time_sec(m, lift_start=first))
+            pos[i] = len(acc) - 1          # 该移动完成时的时间轴位置
+            first = False
+        if len(acc) <= 1:
+            return
+        self._time_prefix = acc
+        self._time_pos = pos
+
+    def _show_play_progress(self):
+        """显示右上角播放进度条 (加载进度显示中则不重复 pack)"""
+        if self._prog is None and self._prog_bar.winfo_manager() != "pack":
+            self._prog_bar.pack(side="right")
+            self._prog_lbl.pack(side="right", padx=(0, 6))
+
+    def _hide_play_progress(self):
+        """隐藏右上角播放进度条 (不影响加载进度状态)"""
+        if self._prog is None:
+            self._prog_lbl.pack_forget()
+            self._prog_bar.pack_forget()
+
+    def _update_play_progress(self):
+        """播放推进时更新右上角进度条: 当前行累计加工时间/总时间 -> 百分比"""
+        if self._time_prefix is None or self.current_line is None:
+            return
+        m = self.move_by_line.get(self.current_line)
+        if m is None:
+            return
+        idx = self._move_index.get(id(m))
+        if idx is None or idx not in self._time_pos:
+            return
+        pos = self._time_pos[idx]
+        total = self._time_prefix[-1]
+        if total <= 0:
+            return
+        frac = min(1.0, self._time_prefix[pos] / total)
+        self._show_play_progress()
+        self._prog_bar.config(value=frac * 100)
+        self._prog_lbl.config(text="%.1f%%" % (frac * 100))
+
     def _stop_playback(self):
         """停止播放/演示 (幂等)"""
         self._play_mode = None
@@ -2547,11 +2982,13 @@ class NCViewer(tk.Tk):
         lo, hi = self._seg_line_bounds()
         base = self.current_line if self.current_line else lo - 1
         if base >= hi:
+            self._hide_play_progress()   # 播放到结尾: 隐藏进度条
             self._stop_playback()
             return
         # 合并跳行: 一次推进 N 行 (段模式钳制在段内)
         ln = min(base + self._batch_lines(), hi)
         self.set_current_line(ln, animate=True)
+        self._update_play_progress()     # 进度条按加工时间显示当前进度
         self._play_job = self.after(self._play_speed_ms(), self._play_tick)
 
     def _step_line_ctl(self, delta):
@@ -2566,11 +3003,13 @@ class NCViewer(tk.Tk):
         base = self.current_line if self.current_line else lo - 1
         ln = max(lo, min(hi, base + delta))
         self.set_current_line(ln, animate=True)
+        self._update_play_progress()     # 单步推进也按加工时间更新进度
 
     def _reset_line(self):
         if not self.result:
             return
         self._stop_playback()
+        self._hide_play_progress()       # 复位回起点: 隐藏播放进度条
         if not self._trace_active:
             self._trace_begin()
         lo, _ = self._seg_line_bounds()
@@ -2630,6 +3069,7 @@ class NCViewer(tk.Tk):
             return
         ln = min(cur + self._demo_step, self._demo_target)
         self.set_current_line(ln, animate=True)
+        self._update_play_progress()     # 演示逐帧推进时同步加工时间进度
         self._play_job = self.after(self._play_speed_ms(), self._demo_tick)
 
     # ------------- 轨迹渐进绘制 (播放/演示时刀路逐行画出) -------------
@@ -2697,8 +3137,6 @@ class NCViewer(tk.Tk):
                 continue
             color = color_of_move(m, self.palette)
             pts3d = self._disp3d[i]
-            if self._drag_coarse and len(pts3d) > 4:   # 拖动中抽稀: 圆弧减半采样
-                pts3d = pts3d[::2] + [pts3d[-1]]
             coords = []
             for px, py, pz in pts3d:
                 tx = 2 * (y * pz - z * py)
@@ -2730,7 +3168,8 @@ class NCViewer(tk.Tk):
 def main():
     _enable_dpi_awareness()
     app = NCViewer()
-    # 命令行可直接传文件路径
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        app.after(100, lambda: app.open_file(sys.argv[1]))
+    # 命令行可直接传文件路径 (支持多个, 与界面多选等效)
+    files = [a for a in sys.argv[1:] if os.path.isfile(a)]
+    if files:
+        app.after(100, lambda: app.add_files(files))
     app.mainloop()
