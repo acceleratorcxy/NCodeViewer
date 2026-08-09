@@ -1,0 +1,381 @@
+# -*- coding: utf-8 -*-
+"""Qt 离屏渲染器: 无窗口渲染刀路到 FBO, 读回 QImage 供 Tk 显示
+
+画布区域为 Tk canvas (纯 Tk 控件), 渲染由 Qt GPU 完成:
+  1. 刀路 VBO (全量合并折线, 不抽稀) 静态上传
+  2. 旋转/缩放/平移只更新 MVP
+  3. 渲染到离屏 FBO -> toImage() 读回 (Qt C++ 层, 快)
+  4. overlay (XYZ 轴/当前行/十字线/方向箭头/刀具) 用立即模式叠加
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+from PyQt5.QtGui import (QSurfaceFormat, QOpenGLShaderProgram,
+                         QOpenGLShader, QOpenGLBuffer, QMatrix4x4,
+                         QOpenGLVersionProfile, QOpenGLFramebufferObject,
+                         QOpenGLContext)
+from PyQt5.QtGui import QOffscreenSurface
+
+from .geometry import (move_points_3d, color_of_move, project, VIEW_QUAT,
+                       BG_COLOR, CUR_COLOR, CUR_LINE_COLOR, SEG_COLOR,
+                       G0_COLOR)
+from .tool import tool_full_profile, tool_overall_height
+
+VERT_SRC = """
+attribute vec3 aPos;
+attribute vec3 aColor;
+uniform mat4 uMVP;
+varying vec3 vColor;
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    vColor = aColor;
+}
+"""
+
+FRAG_SRC = """
+varying vec3 vColor;
+void main() {
+    gl_FragColor = vec4(vColor, 1.0);
+}
+"""
+
+
+def _hex_rgb(s):
+    return (int(s[1:3], 16) / 255.0, int(s[3:5], 16) / 255.0,
+            int(s[5:7], 16) / 255.0)
+
+
+class OffscreenRenderer:
+    """离屏 OpenGL 渲染器 (QOffscreenSurface + FBO)"""
+
+    def __init__(self):
+        fmt = QSurfaceFormat()
+        fmt.setSamples(4)
+        fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+        fmt.setVersion(2, 0)
+        self._fmt = fmt
+        self.surface = QOffscreenSurface()
+        self.surface.setFormat(fmt)
+        self.surface.create()
+        self.ctx = QOpenGLContext()
+        self.ctx.setFormat(fmt)
+        self.ctx.create()
+        if not self.ctx.makeCurrent(self.surface):
+            raise RuntimeError("离屏 OpenGL 上下文创建失败")
+        prof = QOpenGLVersionProfile()
+        prof.setVersion(2, 0)
+        self.gl = self.ctx.versionFunctions(prof)
+        self.gl.initializeOpenGLFunctions()
+        self.gl.glClearColor(int(BG_COLOR[1:3], 16) / 255.0,
+                             int(BG_COLOR[3:5], 16) / 255.0,
+                             int(BG_COLOR[5:7], 16) / 255.0, 1.0)
+        self._fbo = None
+        self._program = None
+        self._vbo = QOpenGLBuffer(QOpenGLBuffer.VertexBuffer)
+        self._vbo_data = None
+        self._nverts = 0
+        self._move_seg_map = {}
+        self._world = None
+        self._tool = None
+        self._show_tool = True
+
+    # ---------- 数据 ----------
+    def set_result(self, result, palette, seg_filter=None, show_g0=True):
+        """重建刀路 VBO (全量合并折线, 段过滤/G0 过滤)"""
+        rows = []
+        world = []
+        check_seg = seg_filter is not None
+
+        def flush_poly():
+            """当前折线落库为行顶点对, 返回其段数"""
+            if len(poly) < 2:
+                return 0
+            cr, cg, cb = _hex_rgb(poly_col)
+            for a, b_ in zip(poly, poly[1:]):
+                rows.append((a[0], a[1], a[2], b_[0], b_[1], b_[2],
+                             cr, cg, cb))
+                world.append(a)
+            world.append(poly[-1])
+            return len(poly) - 1
+
+        flushed = 0          # 已 flush (颜色段切换时落库) 的折线段数
+        seg_map = {}
+        poly = []
+        poly_col = None
+        for i, m in enumerate(result.moves):
+            if m.motion == "G0" and not show_g0:
+                continue
+            if check_seg:
+                if not any(lo <= i <= hi for lo, hi in seg_filter):
+                    continue
+            pts = move_points_3d(m)
+            col = color_of_move(m, palette)
+            if poly and poly_col == col and poly[-1] == pts[0]:
+                poly.extend(pts[1:])
+            else:
+                flushed += flush_poly()
+                poly = list(pts)
+                poly_col = col
+            # 移动 i 完成后的真实累计段数 = 已 flush + 当前折线段数。
+            # 若按旧值 (只计 flush 边界) 记录, 合并进同色折线的移动在播放时
+            # 整段不显示, 直到颜色段结束才整条一起出现 (一段颜色执行完才显示)
+            seg_map[i] = flushed + len(poly) - 1
+        flushed += flush_poly()
+        self._move_seg_map = seg_map
+        if not rows:
+            self._vbo_data = None
+            self._nverts = 0
+            self._world = None
+            return
+        arr = np.asarray(rows, dtype=np.float32)
+        inter = np.empty((flushed * 2, 6), dtype=np.float32)
+        inter[0::2, :3] = arr[:, 0:3]
+        inter[1::2, :3] = arr[:, 3:6]
+        inter[0::2, 3:] = arr[:, 6:9]
+        inter[1::2, 3:] = arr[:, 6:9]
+        self._vbo_data = inter
+        self._nverts = flushed * 2
+        self._world = np.asarray(world, dtype=np.float32)
+        self._upload_vbo()
+
+    def set_tool(self, tool, show=True):
+        self._tool = tool
+        self._show_tool = show
+
+    def _upload_vbo(self):
+        if self._vbo_data is None:
+            return
+        if not self._vbo.isCreated():
+            self._vbo.create()
+        self._vbo.bind()
+        self._vbo.allocate(self._vbo_data.tobytes(),
+                           self._vbo_data.nbytes)
+
+    # ---------- 渲染 ----------
+    def render(self, quat, scale, offset, W, H, trace_drawn=None,
+               current_line=None, move_by_line=None, result=None):
+        """渲染一帧到 FBO 并读回 QImage"""
+        if self._fbo is None or self._fbo.width() != W or self._fbo.height() != H:
+            self._fbo = QOpenGLFramebufferObject(W, H)   # 旧 FBO 由 GC 回收
+        self._fbo.bind()
+        gl = self.gl
+        gl.glViewport(0, 0, W, H)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+        if self._vbo_data is not None:
+            if self._program is None:
+                prog = QOpenGLShaderProgram()
+                prog.addShaderFromSourceCode(QOpenGLShader.Vertex, VERT_SRC)
+                prog.addShaderFromSourceCode(QOpenGLShader.Fragment, FRAG_SRC)
+                prog.link()
+                self._program = prog
+            prog = self._program
+            prog.bind()
+            self._vbo.bind()
+            prog.enableAttributeArray("aPos")
+            prog.setAttributeBuffer("aPos", gl.GL_FLOAT, 0, 3, 24)
+            prog.enableAttributeArray("aColor")
+            prog.setAttributeBuffer("aColor", gl.GL_FLOAT, 12, 3, 24)
+            prog.setUniformValue("uMVP", self._mvp(quat, scale, offset, W, H))
+            n_draw = self._nverts
+            if trace_drawn is not None:
+                segs = self._move_seg_map.get(max(0, trace_drawn - 1), 0) \
+                    if trace_drawn > 0 else 0
+                n_draw = min(segs * 2, self._nverts)
+            gl.glDrawArrays(gl.GL_LINES, 0, n_draw)
+            prog.release()
+        # overlay: XYZ 轴/当前行/十字线/箭头/刀具 (立即模式)
+        self._draw_overlay(gl, quat, scale, offset, W, H, trace_drawn,
+                           current_line, move_by_line, result)
+        img = self._fbo.toImage()
+        return img
+
+    def _mvp(self, quat, scale, offset, W, H):
+        w, x, y, z = quat
+        ox, oy = offset
+        r00 = 1 - 2 * (y * y + z * z); r01 = 2 * (x * y - w * z); r02 = 2 * (x * z + w * y)
+        r10 = 2 * (x * y + w * z); r11 = 1 - 2 * (x * x + z * z); r12 = 2 * (y * z - w * x)
+        return QMatrix4x4(
+            2 * scale / W * r00, 2 * scale / W * r01, 2 * scale / W * r02,
+            2 * ox / W - 1,
+            2 * scale / H * r10, 2 * scale / H * r11, 2 * scale / H * r12,
+            1 - 2 * oy / H,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.0)
+
+    def _ndc(self, mx, my, W, H):
+        return mx / W * 2 - 1, 1 - my / H * 2
+
+    def _draw_overlay(self, gl, quat, scale, offset, W, H, trace_drawn,
+                      current_line, move_by_line, result):
+        def ndc(mx, my):
+            return mx / W * 2 - 1, 1 - my / H * 2
+        # XYZ 轴
+        if result is not None:
+            ox, oy = ndc(offset[0], offset[1])
+            r = max(scale * 8, 30)
+            for axis, rgb, vec in (("X", (1.0, 0.33, 0.33), (1, 0, 0)),
+                                   ("Y", (0.33, 1.0, 0.33), (0, 1, 0)),
+                                   ("Z", (0.33, 1.0, 1.0), (0, 0, 1))):
+                a, b = project((vec[0] * r, vec[1] * r, vec[2] * r), quat)
+                ex, ey = ndc(a * scale + offset[0], -b * scale + offset[1])
+                gl.glBegin(gl.GL_LINES)
+                gl.glColor3f(*rgb)
+                gl.glVertex2f(ox, oy)
+                gl.glVertex2f(ex, ey)
+                gl.glEnd()
+            gl.glPointSize(6)
+            gl.glBegin(gl.GL_POINTS)
+            gl.glColor3f(1.0, 1.0, 1.0)
+            gl.glVertex2f(ox, oy)
+            gl.glEnd()
+            gl.glPointSize(1)
+        # 当前行高亮 + 方向箭头
+        if current_line is not None and result is not None:
+            m = move_by_line.get(current_line) if move_by_line else None
+            if m is not None:
+                pts = move_points_3d(m)
+                screen = []
+                for px, py, pz in pts:
+                    a, b = project((px, py, pz), quat)
+                    screen.append(ndc(a * scale + offset[0],
+                                      -b * scale + offset[1]))
+                gl.glLineWidth(3)
+                gl.glBegin(gl.GL_LINE_STRIP)
+                gl.glColor3f(*_hex_rgb(SEG_COLOR))
+                for nx, ny in screen:
+                    gl.glVertex2f(nx, ny)
+                gl.glEnd()
+                gl.glLineWidth(1)
+                n = len(screen)
+                if n >= 2:
+                    t_vals = [0.6] if n == 2 else [0.25, 0.5, 0.75]
+                    samples = []
+                    for frac in t_vals:
+                        seg = frac * (n - 1)
+                        i = int(seg)
+                        t = seg - i
+                        j = min(i + 1, n - 1)
+                        samples.append((screen[i][0] + (screen[j][0] - screen[i][0]) * t,
+                                        screen[i][1] + (screen[j][1] - screen[i][1]) * t))
+                    size_px = 14.0 / max(W, 1) * 2
+                    for k, (x, y) in enumerate(samples):
+                        if k + 1 < len(samples):
+                            nx, ny = samples[k + 1]
+                        else:
+                            nx, ny = screen[-1]
+                        dx, dy = nx - x, ny - y
+                        L = math.hypot(dx, dy)
+                        if L < 1e-6:
+                            continue
+                        ux, uy = dx / L, dy / L
+                        px, py = -uy, ux
+                        size = min(size_px, L * 0.5)
+                        b1x = x - ux * size + px * size * 0.55
+                        b1y = y - uy * size + py * size * 0.55
+                        b2x = x - ux * size - px * size * 0.55
+                        b2y = y - uy * size - py * size * 0.55
+                        gl.glBegin(gl.GL_TRIANGLES)
+                        gl.glColor3f(*_hex_rgb(CUR_COLOR))
+                        gl.glVertex2f(x, y)
+                        gl.glVertex2f(b1x, b1y)
+                        gl.glVertex2f(b2x, b2y)
+                        gl.glEnd()
+            # 十字线 + 当前点
+            p3 = result.position_at_line(current_line)
+            w, x, y, z = quat
+            px, py, pz = p3
+            tx = 2 * (y * pz - z * py)
+            ty = 2 * (z * px - x * pz)
+            tz = 2 * (x * py - y * px)
+            vx = px + w * tx + y * tz - z * ty
+            vy = py + w * ty + z * tx - x * tz
+            cx, cy = ndc(vx * scale + offset[0], -vy * scale + offset[1])
+            gl.glBegin(gl.GL_LINES)
+            gl.glColor3f(*_hex_rgb(CUR_LINE_COLOR))
+            gl.glVertex2f(cx, -1.0)
+            gl.glVertex2f(cx, 1.0)
+            gl.glVertex2f(-1.0, cy)
+            gl.glVertex2f(1.0, cy)
+            gl.glEnd()
+            gl.glPointSize(7)
+            gl.glBegin(gl.GL_POINTS)
+            gl.glColor3f(*_hex_rgb(CUR_COLOR))
+            gl.glVertex2f(cx, cy)
+            gl.glEnd()
+            gl.glPointSize(1)
+        # 3D 刀具模型 (轮廓线)
+        if self._show_tool and self._tool is not None and result is not None:
+            self._draw_tool_model(gl, quat, scale, offset, W, H,
+                                  current_line, result, ndc)
+
+    def _draw_tool_model(self, gl, quat, scale, offset, W, H, current_line,
+                         result, ndc):
+        tool = self._tool
+        pos = (result.position_at_line(current_line)
+               if current_line else (0.0, 0.0, 0.0))
+        full = tool_full_profile(tool)
+        max_r = max(r for r, _ in full)
+        px_w = 2 * max_r * scale
+        factor = 1.0
+        if 0 < px_w < 24:
+            factor = min(24.0 / px_w, 6.0)
+        h = tool_overall_height(tool)
+        r_top = full[-1][0]
+        # 实体轮廓 (右缘 + 顶部圆 + 左缘)
+        top_circle = [(r_top * math.cos(t), r_top * math.sin(t), h)
+                      for t in (i * math.tau / 24 for i in range(24))]
+        body = ([(r, 0.0, y) for r, y in full] + top_circle
+                + [(-r, 0.0, y) for r, y in reversed(full)])
+
+        def verts(pts):
+            out = []
+            for x, y, z in pts:
+                wx = pos[0] + x * factor
+                wy = pos[1] + y * factor
+                wz = pos[2] + z * factor
+                a, b = project((wx, wy, wz), quat)
+                out.append(ndc(a * scale + offset[0], -b * scale + offset[1]))
+            return out
+
+        v = verts(body)
+        gl.glLineWidth(2)
+        gl.glBegin(gl.GL_LINE_LOOP)
+        gl.glColor3f(0.83, 0.83, 0.86)
+        for nx, ny in v:
+            gl.glVertex2f(nx, ny)
+        gl.glEnd()
+        gl.glLineWidth(1)
+        # 截面圆 (最大半径处)
+        for y in sorted({y for r, y in full if abs(r - max_r) < 1e-9}):
+            circle = [(max_r * math.cos(t), max_r * math.sin(t), y)
+                      for t in (i * math.tau / 24 for i in range(24))]
+            v = verts(circle)
+            gl.glBegin(gl.GL_LINE_LOOP)
+            gl.glColor3f(0.6, 0.6, 0.64)
+            for nx, ny in v:
+                gl.glVertex2f(nx, ny)
+            gl.glEnd()
+        # 经线
+        for ang in (math.pi / 3, 2 * math.pi / 3):
+            mer = [(r * math.cos(ang), r * math.sin(ang), y) for r, y in full]
+            v = verts(mer)
+            gl.glBegin(gl.GL_LINE_STRIP)
+            gl.glColor3f(0.54, 0.54, 0.54)
+            for nx, ny in v:
+                gl.glVertex2f(nx, ny)
+            gl.glEnd()
+        # 轴 + 刀尖
+        v = verts([(0.0, 0.0, 0.0), (0.0, 0.0, h)])
+        gl.glBegin(gl.GL_LINES)
+        gl.glColor3f(0.43, 0.43, 0.43)
+        gl.glVertex2f(v[0][0], v[0][1])
+        gl.glVertex2f(v[1][0], v[1][1])
+        gl.glEnd()
+        gl.glPointSize(6)
+        gl.glBegin(gl.GL_POINTS)
+        gl.glColor3f(*_hex_rgb(CUR_COLOR))
+        gl.glVertex2f(v[0][0], v[0][1])
+        gl.glEnd()
+        gl.glPointSize(1)
