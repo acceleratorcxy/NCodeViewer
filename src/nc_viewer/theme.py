@@ -40,6 +40,10 @@ def apply_theme(root):
     """把深色主题应用到 root (主窗口) 及其全部 ttk 子控件。"""
     style = ttk.Style(root)
     style.theme_use("clam")
+    # Tk 8.6.9 的 ttk.Button width 默认为空串, 产生约 93px(@96DPI) 的宽度
+    # 地板 (与文本长度无关), 按钮一多面板就臃肿; 经选项库全局置 0 后按钮
+    # 按文本自然取宽 (控件的显式 width 选项不受影响, 二级窗口同样生效)
+    root.option_add("*TButton.width", 0)
 
     # 基础容器与文字
     style.configure("TFrame", background=BG)

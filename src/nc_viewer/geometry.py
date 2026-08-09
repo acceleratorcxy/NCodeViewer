@@ -13,6 +13,7 @@ import math
 G0_COLOR = "#9a9a9a"      # 快移灰
 BG_COLOR = "#2b2b2b"      # 画布背景
 CUR_COLOR = "#ffe600"     # 当前位置标记
+CUR_LINE_COLOR = "#786e12"  # 当前位置十字虚线 (暗化黄, 不刺眼)
 SEG_COLOR = "#ff3b3b"     # 当前段高亮
 
 
@@ -94,6 +95,20 @@ def move_points_3d(move, max_seg=2.0):
         pts.append(move.end)
         return pts
     return [move.start, move.end]
+
+
+def point_seg_dist_sq(px, py, x1, y1, x2, y2):
+    """点 (px,py) 到线段 (x1,y1)-(x2,y2) 距离的平方 (垂足钳制在线段内)"""
+    dx = x2 - x1
+    dy = y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 < 1e-12:
+        return (px - x1) ** 2 + (py - y1) ** 2
+    t = ((px - x1) * dx + (py - y1) * dy) / l2
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    cx = x1 + t * dx
+    cy = y1 + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
 
 
 # ---------- 视图投影 (四元数 ArcBall) ----------

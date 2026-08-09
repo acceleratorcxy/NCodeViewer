@@ -6,7 +6,9 @@
 """
 import os
 import re
+import math
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 import pytest
@@ -14,7 +16,7 @@ import pytest
 from nc_viewer import theme
 from nc_viewer.tool import Tool
 from nc_viewer.viewer import NCViewer, _sample_dir
-from nc_viewer.geometry import project
+from nc_viewer.geometry import orbit_rotate, project
 
 OPEN_TEXT = "打开文件…"
 FILE_LIST_TEXT = "文件列表"
@@ -121,6 +123,18 @@ def test_theme_colors_valid():
               theme.ACCENT_HOVER, theme.SELECTION]
     for c in colors:
         assert re.fullmatch(r"#[0-9a-fA-F]{6}", c), f"非法颜色值: {c}"
+
+
+def test_buttons_size_to_text(app):
+    """ttk 按钮按文本自然取宽 (修复 Tk 8.6.9 空 width 产生的宽度地板)"""
+    frm = ttk.Frame(app)
+    b1 = ttk.Button(frm, text="跳转")
+    b2 = ttk.Button(frm, text="取消选择")
+    b1.grid()
+    b2.grid()
+    frm.update_idletasks()
+    assert b2.winfo_reqwidth() > b1.winfo_reqwidth()
+    frm.destroy()
 
 
 # ---------- 程序统计 / F 曲线 / 图例 ----------
@@ -314,6 +328,114 @@ def test_small_screen_sidebar_scrolls(app, tmp_path):
     assert app.side_canvas.yview()[0] > 0.0
 
 
+def test_sidebar_min_width_during_sash_drag(app):
+    """左右侧栏最小宽度: sash 拖过最小值时被钳回。
+
+    回归: ttk 类绑定(移动 sash)先于实例绑定(钳制)执行时钳制被覆盖,
+    须让类绑定先跑、实例钳制后跑。
+    """
+    app.state("normal")
+    app.geometry("1600x900")
+    app.update()
+    up = app.upper_pane
+    # 左: 文件栏 sash 向左拖到 10px (远小于 _min_fs)
+    up.event_generate("<ButtonPress-1>", x=up.sashpos(0), y=200)
+    up.event_generate("<B1-Motion>", x=10, y=200)
+    app.update()
+    assert up.sashpos(0) >= app._min_fs
+    # 右: 统计侧栏 sash 向右拖到距右缘 10px (远小于 _min_side)
+    uw = up.winfo_width()
+    up.event_generate("<ButtonPress-1>", x=up.sashpos(1), y=200)
+    up.event_generate("<B1-Motion>", x=uw - 10, y=200)
+    app.update()
+    assert uw - up.sashpos(1) >= app._min_side
+
+
+def test_sidebar_content_fits_at_min_width(app, tmp_path):
+    """右侧栏放到最窄时内容自适应: 各节请求宽度不超过视口 (无横向溢出)。
+
+    回归: 内嵌剖面画布用 Canvas 默认宽 (10cm≈567px@144DPI) 会把刀具栏
+    请求宽撑到 587, 最小宽度下内容溢出; 画布应只请求小宽度并靠 weight 拉伸。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    (tmp_path / "t_I.aptsource").write_text(
+        "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+        "         0.000000, 30.000000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800")
+    app.update()
+    up = app.upper_pane
+    up.sashpos(1, up.winfo_width() - app._min_side)
+    app.update()
+    viewport = app.side_canvas.winfo_width()
+    assert app._side_inner.winfo_reqwidth() <= viewport
+
+
+def test_file_panel_min_fits_listbox(app):
+    """文件栏最小宽度容纳列表自然宽 (最窄时文件名不被过度截断)"""
+    assert app._min_fs >= app.file_listbox.winfo_reqwidth()
+    app.state("normal")
+    app.geometry("1280x800")
+    app.update()
+    up = app.upper_pane
+    up.sashpos(0, app._min_fs)
+    app.update()
+    # 列表在最小宽度下不被压缩
+    assert app.file_listbox.winfo_width() >= app.file_listbox.winfo_reqwidth() - 4
+
+
+def test_pane_defaults_fit_content(app, tmp_path):
+    """默认(未拖 sash)时三栏宽度=内容自然宽: 内容完整显示无横向挤压/溢出"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    (tmp_path / "t_I.aptsource").write_text(
+        "CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\n"
+        "         0.000000, 30.000000\n", encoding="utf-8")
+    app._upper_touched = False                # 忽略前序测试的模拟拖拽
+    app._rc_touched = False
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800")
+    app.update()
+    app._fit_pane_widths()
+    app.update()
+    # 右侧栏: 内容无横向溢出
+    assert app._side_inner.winfo_reqwidth() <= app.side_canvas.winfo_width()
+    # 文件栏: 列表不被压缩
+    assert app.file_listbox.winfo_width() >= app.file_listbox.winfo_reqwidth() - 4
+    # 底部右栏: 两列内容均不被压缩
+    for cv, inner in zip(app._rc_canvases, app._rc_inners):
+        assert inner.winfo_reqwidth() <= cv.winfo_width()
+
+
+def test_bottom_right_columns_wheel_scroll(app, monkeypatch):
+    """底部右栏两列: 滚轮按指针位置滚动对应滚动列 (全局滚轮分派)"""
+    # 分派: 指针在左列 -> 左列画布; 右列 -> 右列画布; 侧栏 -> 侧栏画布
+    assert app._wheel_scroll_target(app.loc_entry) is app._rc_canvases[0]
+    assert app._wheel_scroll_target(app.lift_entry) is app._rc_canvases[1]
+    assert app._wheel_scroll_target(app.stats_labels["x"]) is app.side_canvas
+    # 端到端: 命中左列内容 -> 左列滚动 (winfo_containing 打桩, 与窗口堆叠无关)
+    from types import SimpleNamespace
+    monkeypatch.setattr(app, "winfo_containing", lambda x, y: app.loc_entry)
+    lcv = app._rc_canvases[0]
+    lcv.yview_moveto(0)
+    app._on_side_wheel_global(SimpleNamespace(x_root=0, y_root=0, delta=-120))
+    assert lcv.yview()[0] > 0.0, "滚动列未跟随滚轮滚动"
+
+
+def test_seg_listbox_wheel_skips_column(app, monkeypatch):
+    """滚轮在段列表上: 全局分派跳过 (列表自身滚轮由类绑定处理), 不滚所在列"""
+    assert app._wheel_scroll_target(app.seg_listbox) is None
+    from types import SimpleNamespace
+    monkeypatch.setattr(app, "winfo_containing", lambda x, y: app.seg_listbox)
+    rcv = app._rc_canvases[1]
+    rcv.yview_moveto(0)
+    app._on_side_wheel_global(SimpleNamespace(x_root=0, y_root=0, delta=-120))
+    assert rcv.yview()[0] == 0.0, "所在列不应跟着滚动"
+
+
 def test_segment_fields_and_navigation(app, tmp_path):
     """按段浏览: 段字段、抬刀平面修改重算、段导航"""
     p = tmp_path / "t.nc"
@@ -360,9 +482,9 @@ def test_segment_mode_renders_only_current_segment(app, tmp_path):
     assert app.current_line == 4
     app._play_tick()
     assert app._play_mode is None             # 到段尾停止
-    # 复位到段首
+    # 复位到段首 (段含下落前的抬刀平面定位行 -> 第 1 行)
     app._reset_line()
-    assert app.current_line == 2
+    assert app.current_line == 1
     # 关闭段模式恢复全局
     app._seg_only.set(False)
     app._toggle_seg_only()
@@ -388,16 +510,17 @@ def test_segment_multi_select_union_and_stats(app, tmp_path):
     assert "1000" in app.stats_labels["f"]["text"]
     assert "4000" in app.stats_labels["f"]["text"]
     # 段模式: 勾选段1 -> 单范围过滤, 统计为段内 (F 无 3000/4000)
+    # (段边界新语义: 段从抬刀平面定位移动(下落前)开始, 含 move0)
     app._seg_only.set(True)
     app.seg_listbox.selection_set(0)
     app._toggle_seg_only()
-    assert app._seg_filter == [(1, 3)]
+    assert app._seg_filter == [(0, 3)]
     assert "2000" in app.stats_labels["f"]["text"]
     assert "3000" not in app.stats_labels["f"]["text"]
     # 追加勾选段2 -> 并集过滤
     app.seg_listbox.selection_set(1)
     app._on_seg_list_select(None)
-    assert app._seg_filter == [(1, 3), (4, 6)]
+    assert app._seg_filter == [(0, 3), (4, 6)]
     assert "3000" in app.stats_labels["f"]["text"]
     assert "4000" not in app.stats_labels["f"]["text"]
     # 全选 3 段 -> 等同于全程序 (不过滤)
@@ -412,6 +535,540 @@ def test_segment_multi_select_union_and_stats(app, tmp_path):
     app._seg_only.set(False)
     app._toggle_seg_only()
     assert app._seg_filter is None
+
+
+def _write_segments(path, n_segs):
+    """写 n_segs 个抬刀循环的测试程序 (每段 3 行移动, 抬刀平面 Z100)"""
+    lines = []
+    for i in range(n_segs):
+        lines.append("G01X%dZ50F1000" % (3 * i))
+        lines.append("G01X%dZ-2F1000" % (3 * i + 1))
+        lines.append("G01X%dZ100F1000" % (3 * i + 2))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_seg_list_click_preserves_scroll(app, tmp_path):
+    """段列表点击勾选: 重建标记后保持滚动位置 (不跳回顶部导致点击错位)"""
+    p = tmp_path / "t.nc"
+    _write_segments(p, 30)
+    app.open_file(str(p))
+    app.update_idletasks()
+    lb = app.seg_listbox
+    lb.yview_moveto(1.0)
+    app.update_idletasks()
+    top_before = lb.yview()[0]
+    assert top_before > 0.1            # 确实滚到了底部
+    lb.selection_clear(0, "end")
+    lb.selection_set(29)               # 模拟点击列表底部的段
+    app._on_seg_list_select(None)
+    assert 29 in app._seg_checked
+    assert abs(lb.yview()[0] - top_before) < 0.01, "点击后列表滚动位置应保持"
+
+
+def test_seg_filter_change_during_trace_full_render(app, tmp_path):
+    """轨迹播放中改变勾选段: 过滤变化使已画轨迹失效, 必须全量渲染勾选段
+
+    回归: 此前走 _trace_redraw (按旧已画移动数重绘), 新勾选段不显示。
+    """
+    p = tmp_path / "t.nc"
+    _write_segments(p, 5)
+    app.open_file(str(p))
+    app._seg_only.set(True)
+    app._set_checked(0, True)
+    app._apply_seg_filter()
+    app._step_line_ctl(3)              # 进入轨迹模式并画出第 1 段
+    assert app._trace_active
+    assert len(app.canvas.find_withtag("path")) == 1     # 段1 一条折线
+    # 模拟列表点击追加勾选第 5 段
+    app.seg_listbox.selection_set(4)
+    app._on_seg_list_select(None)
+    assert not app._trace_active, "过滤变化后应退出轨迹模式做全量渲染"
+    assert len(app.canvas.find_withtag("path")) == 2     # 段1 + 段5 都显示
+    app._seg_only.set(False)
+    app._toggle_seg_only()
+
+
+def test_current_highlight_skips_filtered_move(app, tmp_path):
+    """当前行落在被过滤的段上时: 不画当前段高亮与方向箭头 (防残留)"""
+    p = tmp_path / "t.nc"
+    _write_segments(p, 5)
+    app.open_file(str(p))
+    app._seg_only.set(True)
+    app._set_checked(0, True)
+    app._apply_seg_filter()
+    app.set_current_line(14)           # 第 5 段内 (行 13~15), 不在勾选段
+    assert not app.canvas.find_withtag("curseg")
+    app._seg_only.set(False)
+    app._toggle_seg_only()
+
+
+def test_code_gutter_shows_segment_numbers(app, tmp_path):
+    """NC 代码区行号槽显示段号: 段内行标注 S<n>, 段外行留空; 改抬刀平面后重建"""
+    p = tmp_path / "t.nc"
+    _write_segments(p, 3)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write("(done)\n")
+    app.open_file(str(p))
+
+    def gutter(ln):
+        return app.code.get("%d.0" % ln, "%d.end" % ln).split("|", 1)[1][:4].strip()
+
+    assert gutter(1) == "S1"           # 第 1 段 (行 1~3)
+    assert gutter(5) == "S2"           # 第 2 段 (行 4~6)
+    assert gutter(10) == ""            # 段外行无标注
+    # 抬刀平面改到所有 Z 之上 -> 合并为 1 段, 标注随之重建
+    app.lift_entry.delete(0, "end")
+    app.lift_entry.insert(0, "1000")
+    app._apply_lift()
+    assert gutter(5) == "S1"
+    app._auto_lift()
+
+
+def test_draw_all_batches_coords_calls(app, tmp_path, monkeypatch):
+    """绘制到结尾(大跳): canvas.coords 统一批量回写, 调用次数与移动数无关。
+
+    回归: 逐移动回写合并折线的全量坐标是 O(n^2), 大程序"复位+绘制到结尾"卡死。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("\n".join("G01X%dF1000" % i for i in range(1, 301)) + "\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    calls = []
+    orig = app.canvas.coords
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(app.canvas, "coords", spy)
+    app._draw_all()
+    assert app._trace_active
+    # 300 个同色连续移动合并为 1 条折线, 末尾统一回写 (而非逐移动 299 次)
+    assert len(calls) <= 3
+    app._reset_line()
+
+
+def test_crosshair_respans_and_dimmed(app, tmp_path):
+    """十字虚线: 平移后重铺到可视区两端; 颜色暗化不刺眼 (当前点仍亮黄)"""
+    from nc_viewer.geometry import CUR_COLOR, CUR_LINE_COLOR
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nG01X30Y40\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.set_current_line(2)
+    from types import SimpleNamespace
+    app._pan_start(SimpleNamespace(x=400, y=300))
+    app._pan_move(SimpleNamespace(x=620, y=390))
+    app._pan_end(SimpleNamespace(x=620, y=390))
+    lines = [i for i in app.canvas.find_withtag("curx")
+             if app.canvas.type(i) == "line"]
+    assert len(lines) == 2, "应有横竖两条十字虚线"
+    cw, ch = app.canvas.winfo_width(), app.canvas.winfo_height()
+    spans = [app.canvas.coords(i) for i in lines]
+    assert any(x0 == 0 and x1 == cw for x0, y0, x1, y1 in spans), \
+        "平移后横线应铺满可视区宽度"
+    assert any(y0 == 0 and y1 == ch for x0, y0, x1, y1 in spans), \
+        "平移后竖线应铺满可视区高度"
+    assert all(app.canvas.itemcget(i, "fill") == CUR_LINE_COLOR for i in lines)
+    ovals = [i for i in app.canvas.find_withtag("cur")
+             if app.canvas.type(i) == "oval"]
+    assert ovals and all(app.canvas.itemcget(i, "fill") == CUR_COLOR
+                         for i in ovals)
+
+
+def test_canvas_click_pick_jumps_to_line(app, tmp_path):
+    """画布单击刀路: 拾取最近可见移动并跳转对应 NC 行; 拖动/点空白不触发"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y10F1000\nG01X110Y10\nG01X110Y110\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()                # 打开时画布未定型, 重新适配使比例确定
+
+    def click(wx, wy, drag=False):
+        a, b = project((wx, wy, 0.0), app.quat)
+        mx, my = app.world_to_canvas(a, b)
+        app._pan_start(SimpleNamespace(x=mx, y=my))
+        if drag:
+            app._pan_move(SimpleNamespace(x=mx + 120, y=my + 80))
+            app._pan_end(SimpleNamespace(x=mx + 120, y=my + 80))
+        else:
+            app._pan_end(SimpleNamespace(x=mx, y=my))
+
+    click(60.0, 10.0)             # 第 2 行移动 (X10..X110) 的中点
+    assert app.current_line == 2
+    click(110.0, 70.0)            # 第 3 行移动上的一点
+    assert app.current_line == 3
+    click(-400.0, -400.0)         # 空白处: 清除选择
+    assert app.current_line is None
+    app.set_current_line(2)
+    click(60.0, 10.0, drag=True)  # 拖动平移: 不触发拾取也不清除
+    assert app.current_line == 2
+
+
+def test_canvas_click_empty_clears_selection(app, tmp_path):
+    """点击无刀路区域: 清除当前位置选择 (画布标记/位置字段/代码高亮)"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y10F1000\nG01X110Y10\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+
+    def click(wx, wy):
+        a, b = project((wx, wy, 0.0), app.quat)
+        mx, my = app.world_to_canvas(a, b)
+        app._pan_start(SimpleNamespace(x=mx, y=my))
+        app._pan_end(SimpleNamespace(x=mx, y=my))
+
+    click(60.0, 10.0)             # 先点中刀路建立选择
+    assert app.current_line == 2
+    assert app.canvas.find_withtag("cur")
+    assert app.pos_fields["X"].get() == "110.000"
+    click(-500.0, -500.0)         # 点无刀路区域 -> 清除
+    assert app.current_line is None
+    assert not app.canvas.find_withtag("cur")
+    assert not app.canvas.find_withtag("curseg")
+    assert app.pos_fields["X"].get() == "-"
+    assert app.pos_fields["行"].get() == "-"
+    assert app.pos_fields["本行"].get() == "-"
+    assert app.code.tag_ranges("cur") == ()
+    assert app.loc_entry.get() == ""
+
+
+def test_canvas_click_pick_respects_visibility(app, tmp_path):
+    """拾取只看可见刀路: G0 隐藏时快移点不中, 显示后可点"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG0X110Y0\nG01X110Y100F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+
+    def click(wx, wy):
+        a, b = project((wx, wy, 0.0), app.quat)
+        mx, my = app.world_to_canvas(a, b)
+        app._pan_start(SimpleNamespace(x=mx, y=my))
+        app._pan_end(SimpleNamespace(x=mx, y=my))
+
+    app.show_g0.set(False)
+    app._view_refresh()
+    click(60.0, 0.0)              # G0 段中点 (已隐藏, 距可见段 >12px)
+    assert app.current_line is None
+    app.show_g0.set(True)
+    app._view_refresh()
+    click(60.0, 0.0)              # G0 段中点 (显示后可点中)
+    assert app.current_line == 2
+
+
+def test_canvas_click_pick_respects_seg_filter(app, tmp_path):
+    """段过滤后, 被过滤段的刀路点不中"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    # 两段抬刀循环, X 相距 100 (段2 刀路距段1 任意可见移动 >12px)
+    p.write_text("G01X0Z50F1000\nG01X5Z-2F1000\nG01X10Z100F1000\n"
+                 "G01X100Z50F1000\nG01X105Z-2F1000\nG01X110Z100F1000\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+    app._seg_only.set(True)
+    app._set_checked(0, True)
+    app._apply_seg_filter()
+    # 段2 的移动 (行5: X100Z50 -> X105Z-2) 的中点, 段2 未勾选
+    a, b = project((102.5, 0.0, 24.0), app.quat)
+    mx, my = app.world_to_canvas(a, b)
+    app._pan_start(SimpleNamespace(x=mx, y=my))
+    app._pan_end(SimpleNamespace(x=mx, y=my))
+    assert app.current_line is None
+    app._seg_only.set(False)
+    app._toggle_seg_only()
+
+
+def test_direction_arrows_fixed_size_after_zoom(app, tmp_path):
+    """方向箭头固定像素大小: 滚轮缩放后重绘为固定尺寸 (不被 canvas.scale 放大)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG01X200Y0\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+    app.set_current_line(2)
+
+    def arrow_span():
+        spans = []
+        for i in app.canvas.find_withtag("cur"):
+            if app.canvas.type(i) == "polygon":
+                co = app.canvas.coords(i)
+                xs, ys = co[0::2], co[1::2]
+                spans.append(max(max(xs) - min(xs), max(ys) - min(ys)))
+        return spans
+
+    assert arrow_span() and max(arrow_span()) <= 20      # 固定 14px 级
+    app.zoom_at(2.0, None)                               # 放大 2 倍
+    assert arrow_span() and max(arrow_span()) <= 20      # 缩放后仍固定尺寸
+
+
+def test_roll_mode_when_middle_press_off_path(app, tmp_path):
+    """中键未吸附刀路点(空白处)按下: 拖动绕画布中心做平面旋转 (滚转), 中心不动"""
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG01X200Y0\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+
+    def screen_of(wx, wy, wz=0.0):
+        a, b = project((wx, wy, wz), app.quat)
+        return app.world_to_canvas(a, b)
+
+    # 滚转锚点 = 画布中心; 沿以中心为圆心的圆弧拖动 (视觉 CCW 45°)
+    cx = app.canvas.winfo_width() / 2
+    cy = app.canvas.winfo_height() / 2
+    r = 120.0
+    start = SimpleNamespace(x=cx + r, y=cy)
+    end = SimpleNamespace(x=cx + r * math.cos(math.radians(45)),
+                          y=cy - r * math.sin(math.radians(45)))
+    pt = (200.0, 0.0, 0.0)                     # 观察点: 刀路右端
+    x0, y0 = screen_of(*pt)
+    ang0 = math.atan2(-(y0 - cy), x0 - cx)     # 绕画布中心的视觉角度
+    app._rot_start(start)                      # 按下处非顶点 -> 未吸附
+    assert app._rot_mode == "roll"
+    app._rot_move(start)
+    app._rot_move(end)
+    app._rot_end(None)
+    x1, y1 = screen_of(*pt)
+    ang1 = math.atan2(-(y1 - cy), x1 - cx)
+    assert math.degrees(ang1 - ang0) == pytest.approx(45, abs=2)
+    # 画布中心的世界点旋转后仍在画布中心 (固定不动)
+    ax1, ay1 = screen_of(*app._rot_center)
+    assert ax1 == pytest.approx(cx, abs=0.5)
+    assert ay1 == pytest.approx(cy, abs=0.5)
+    # 吸附到刀路点按下: 仍为轨道旋转模式 (旋转吸附按顶点, 取端点附近)
+    px, py = screen_of(198.0, 0.0)
+    app._rot_start(SimpleNamespace(x=px, y=py))
+    assert app._rot_mode == "orbit"
+    app._rot_end(None)
+
+
+def test_click_pick_during_trace_views_without_moving_execution(app, tmp_path):
+    """轨迹/暂停中点击已绘制刀路: 仅查看对应行 (代码高亮+位置字段),
+    执行位置不动, 续播从停下的地方继续"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    p.write_text("\n".join("G01X%dF1000" % (10 * i) for i in range(1, 21)) + "\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+    app._step_line_ctl(15)            # 轨迹模式: 执行到第 15 行
+    assert app.current_line == 15
+    # 点击第 5 行刀路 (已绘制部分): 查看该行
+    a, b = project((45.0, 0.0, 0.0), app.quat)
+    mx, my = app.world_to_canvas(a, b)
+    app._pan_start(SimpleNamespace(x=mx, y=my))
+    app._pan_end(SimpleNamespace(x=mx, y=my))
+    assert app.current_line == 15, "执行位置不应被点击查看改变"
+    assert app.pos_fields["行"].get() == "5"      # 字段显示查看的行
+    assert str(app.code.tag_ranges("viewline")[0]) == "5.0"   # 代码区查看高亮
+    # 续播从停下的地方 (15) 继续
+    app.batch_cb.set("1")             # 共享 fixture: 合并行数显式置 1
+    app._play_toggle()
+    assert app.current_line == 16
+    app._stop_playback()
+
+
+def test_click_pick_limited_to_drawn_in_trace(app, tmp_path):
+    """轨迹模式只能点中已绘制刀路: 未绘制部分不参与拾取, 点击视为空白
+    (取消查看, 执行位置保留)"""
+    from types import SimpleNamespace
+    from nc_viewer.geometry import project
+    p = tmp_path / "t.nc"
+    p.write_text("\n".join("G01X%dF1000" % (10 * i) for i in range(1, 21)) + "\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+    app._step_line_ctl(5)             # 只画到第 5 行
+    # 点击第 15 行刀路位置 (未绘制, 距已绘制部分 >12px)
+    a, b = project((145.0, 0.0, 0.0), app.quat)
+    mx, my = app.world_to_canvas(a, b)
+    app._pan_start(SimpleNamespace(x=mx, y=my))
+    app._pan_end(SimpleNamespace(x=mx, y=my))
+    assert app.current_line == 5, "执行位置应保留"
+    assert app.pos_fields["行"].get() == "5"
+
+
+def test_canvas_resize_keeps_path_items(app, tmp_path):
+    """窗口/画布尺寸变化不重绘刀路 (场景投影未变): path 图元 id 保持不变"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    before = app.canvas.find_withtag("path")
+    assert before
+    app.geometry("1400x860+100+100")
+    app.update()
+    assert app.canvas.find_withtag("path") == before, "尺寸变化不应重建刀路图元"
+
+
+def test_rotation_reuses_path_items(app, tmp_path):
+    """旋转/滚转复用画布图元 (仅 coords 更新, 不 delete/create): id 不变"""
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    before = app.canvas.find_withtag("path")
+    assert before
+    app.quat = orbit_rotate(app.quat, 30, 20)
+    app.render()
+    assert app.canvas.find_withtag("path") == before, "旋转应原位更新坐标而非重建"
+
+
+def test_rotation_coalesces_refresh(app, tmp_path, monkeypatch):
+    """旋转拖动合并刷新: 连续 motion 不逐事件渲染, 释放时一次性最终渲染"""
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    calls = []
+    orig = app._view_refresh
+    monkeypatch.setattr(app, "_view_refresh",
+                        lambda: (calls.append(1), orig()))
+    app._rot_start(SimpleNamespace(x=100, y=100))
+    app._rot_move(SimpleNamespace(x=120, y=110))
+    app._rot_move(SimpleNamespace(x=140, y=120))
+    app._rot_move(SimpleNamespace(x=160, y=130))
+    assert len(calls) <= 1, "连续 motion 不应逐事件渲染 (最多 1 次挂起)"
+    app._rot_end(None)            # 释放: 立即最终全量渲染
+    assert len(calls) >= 1
+
+
+def test_drag_decimation_restores_on_release(app, tmp_path):
+    """旋转拖动中大圆弧抽稀 (减点提速), 释放后恢复全量点数"""
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    # 大圆弧 (r=50 半圆, 离散点多) + 直线; 首行定位移动避开原点起步
+    p.write_text("G01X10Y10F1000\nG02X110Y10I50J0F1000\nG01X110Y60\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.fit_view()
+
+    def total_points():
+        return sum(len(app.canvas.coords(i)) // 2
+                   for i in app.canvas.find_withtag("path"))
+
+    full = total_points()
+    app._rot_start(SimpleNamespace(x=100, y=100))
+    app._rot_move(SimpleNamespace(x=150, y=120))
+    app.update_idletasks()        # 执行合并的拖动帧
+    coarse = total_points()
+    app._rot_end(None)
+    restored = total_points()
+    assert coarse < full, "拖动中应抽稀"
+    assert restored == full, "释放后应恢复全量"
+
+
+def test_progress_dialog_during_load(app, tmp_path, monkeypatch):
+    """加载文件进度弹窗: 超延时任务弹窗, 进度单调推进, 结束后关闭"""
+    app._progress_delay = 0                      # 测试: 立即弹窗
+    p = tmp_path / "t.nc"
+    p.write_text(NC_SMALL, encoding="utf-8")
+    events = []
+    orig = app._progress_update
+
+    def spy(text, frac):
+        events.append((text, frac))
+        orig(text, frac)
+
+    monkeypatch.setattr(app, "_progress_update", spy)
+    app.add_files([str(p)])
+    assert events, "应有进度更新"
+    fracs = [f for _, f in events]
+    assert fracs == sorted(fracs), "进度应单调推进"
+    assert fracs[-1] <= 1.0
+    assert app._prog is None, "加载结束后弹窗应关闭"
+
+
+def test_progress_dialog_mechanics(app):
+    """进度弹窗机制: 延迟内不创建/超延时才创建/标签与进度条更新/关闭销毁"""
+    app._progress_delay = 999                    # 快任务不弹窗
+    app._progress_begin()
+    app._progress_update("x", 0.1)
+    assert app._prog is None
+    app._progress_delay = 0                      # 超延时 -> 创建
+    app._progress_update("读取 a", 0.3)
+    assert app._prog is not None
+    assert app._prog["lbl"]["text"] == "读取 a"
+    assert float(app._prog["bar"]["value"]) == 30.0
+    app._progress_end()
+    assert app._prog is None
+
+
+def test_playback_centers_current_line(app, tmp_path):
+    """播放(动画路径)时当前行在代码区居中; 仅程序开头/结尾允许不在中间;
+    非播放手动跳转仍是最小滚动 see"""
+    p = tmp_path / "t.nc"
+    p.write_text("\n".join("G01X%dF1000" % i for i in range(1, 401)) + "\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x1200+100+100")     # 加高窗口使居中/贴边差异可区分
+    app.update()
+    total = 400
+
+    def top_line():
+        return int(app.code.yview()[0] * total) + 1
+
+    def middle_line():
+        f0, f1 = app.code.yview()
+        return int((f0 + f1) / 2 * total) + 1
+
+    app._step_line_ctl(200)                  # 大跳转 (see 远距离也会居中)
+    for _ in range(10):
+        app._step_line_ctl(1)                # 逐行播放推进到 210
+    assert abs(middle_line() - 210) <= 2, "逐行播放时当前行应保持居中"
+    # 非播放手动跳转: see 最小滚动, 视口内不重排
+    before = app.code.yview()
+    app.set_current_line(211)
+    assert app.code.yview() == before
+    app.set_current_line(3, animate=True)    # 程序开头: 顶行即第 1 行
+    assert top_line() == 1
+    app.set_current_line(400, animate=True)  # 程序结尾: 底部贴尾行
+    assert app.code.yview()[1] == 1.0
+    app._stop_playback()
 
 
 def test_position_fields_boxed_values(app, tmp_path):
@@ -429,6 +1086,19 @@ def test_position_fields_boxed_values(app, tmp_path):
     assert app.pos_fields["G"].get() == "G1"
     assert app.pos_fields["行"].get() == "1"
     assert app.pos_fields["本行"].get() == "G01X10Y20F1000"
+
+
+def test_position_benhang_label_and_value_two_rows(app):
+    """当前位置「本行」: 标签与内容拆成两行 (标签行在上, 值框整行跨满在下)"""
+    ent = app.pos_fields["本行"]
+    parent = ent.master
+    info = ent.grid_info()
+    assert info["row"] == 1                       # 值框在第二行
+    assert "e" in info["sticky"] and "w" in info["sticky"]   # 整行跨满
+    labels = [w for w in parent.winfo_children()
+              if isinstance(w, ttk.Label) and str(w.cget("text")) == "本行"]
+    assert labels, "本行标签不存在"
+    assert labels[0].grid_info()["row"] == 0      # 标签在第一行
 
 
 def test_tool_profile_inline_drawn(app, tmp_path):
@@ -553,6 +1223,35 @@ def test_set_target_does_not_move_position(app, tmp_path):
     assert app._target_line == 2
     assert app.current_line == 1
     assert "target" in app.code.tag_names("2.0")
+
+
+def test_target_line_toggle_and_clear_button(app, tmp_path):
+    """目标行: 点击选中, 再点同一行清空; 控制条「清空」按钮可清空且状态跟随"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10F1000\nG01X20\nG01X30\n", encoding="utf-8")
+    app.open_file(str(p))
+    # 初始: 无目标, 按钮禁用
+    assert app._target_line is None
+    assert str(app.target_clear_btn["state"]) == "disabled"
+    # 点击第 2 行 -> 选中
+    app._toggle_target(2)
+    assert app._target_line == 2
+    assert "target" in app.code.tag_names("2.0")
+    assert app.target_lbl["text"] == "目标行: 2"
+    assert str(app.target_clear_btn["state"]) == "normal"
+    # 再点同一行 -> 清空
+    app._toggle_target(2)
+    assert app._target_line is None
+    assert app.code.tag_ranges("target") == ()
+    assert app.target_lbl["text"] == "目标行: -"
+    assert str(app.target_clear_btn["state"]) == "disabled"
+    # 选中后经「清空」按钮清空
+    app._toggle_target(3)
+    assert app._target_line == 3
+    app.target_clear_btn.invoke()
+    assert app._target_line is None
+    assert app.code.tag_ranges("target") == ()
+    assert str(app.target_clear_btn["state"]) == "disabled"
 
 
 def test_run_to_target_instant(app, tmp_path):

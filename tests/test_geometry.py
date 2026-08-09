@@ -5,8 +5,8 @@ import math
 import pytest
 
 from nc_viewer.geometry import (arc_points, compensate_center, orbit_rotate,
-                                project, quat_from_axis_angle, quat_mul,
-                                quat_normalize)
+                                point_seg_dist_sq, project, quat_from_axis_angle,
+                                quat_mul, quat_normalize)
 
 
 def test_orbit_rotate_drag_right_moves_pivot_right():
@@ -72,3 +72,11 @@ def test_small_arc_points_lie_on_circle():
     for p in pts:
         d = math.hypot(p[0] - 1.0, p[1] - 0.0)
         assert d == pytest.approx(1.0, abs=1e-6)
+
+
+def test_point_seg_dist_sq():
+    """点到线段距离平方: 垂足在线段内取垂距, 在线段外取端点距, 退化线段取点距"""
+    assert point_seg_dist_sq(0, 5, -10, 0, 10, 0) == 25      # 垂足在线段内
+    assert point_seg_dist_sq(15, 0, -10, 0, 10, 0) == 25     # 垂足外 -> 近端点
+    assert point_seg_dist_sq(3, 0, -10, 0, 10, 0) == 0       # 在线上
+    assert point_seg_dist_sq(1, 1, 0, 0, 0, 0) == 2          # 退化线段 -> 点距

@@ -25,9 +25,11 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from . import theme
-from .geometry import (CUR_COLOR, G0_COLOR, SEG_COLOR, VIEW_QUAT,
-                       build_palette, color_of_move, compensate_center,
-                       move_points_3d, orbit_rotate, project, quat_rotate)
+from .geometry import (CUR_COLOR, CUR_LINE_COLOR, G0_COLOR, SEG_COLOR,
+                       VIEW_QUAT, build_palette, color_of_move,
+                       compensate_center, move_points_3d, orbit_rotate,
+                       point_seg_dist_sq, project, quat_from_axis_angle,
+                       quat_mul, quat_normalize, quat_rotate)
 from .parser import (compute_lift_plane, compute_segments, compute_stats,
                      parse_nc)
 from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_full_profile,
@@ -89,6 +91,18 @@ def _make_scroll_col(parent):
         w, width=max(e.width, i.winfo_reqwidth()),
         height=max(e.height, i.winfo_reqheight())))    # 内容/画布宽高较大者为准
     return box, canvas, inner
+
+
+def _class_first_bindtags(w):
+    """让 ttk 类绑定先于实例绑定执行。
+
+    PanedWindow 的 sash 拖动由类绑定处理; 默认实例绑定先跑, 此刻 sash
+    尚未移动, 钳制值随即被类绑定覆盖 (最小宽度失效)。交换 bindtags 前
+    两项后, sash 先被 ttk 移动, 实例钳制最后生效。
+    """
+    tags = list(w.bindtags())
+    if len(tags) >= 2:
+        w.bindtags((tags[1], tags[0]) + tuple(tags[2:]))
 
 
 def _mpf_program_name(text):
@@ -162,6 +176,7 @@ class NCViewer(tk.Tk):
         self._search_pattern = None
         self._search_hits = []
         self._search_idx = -1
+        self._code_line_h = None         # 代码行高缓存 (播放居中用)
 
         self._current_path = None        # 当前文件的完整路径 (供二级窗口标题)
 
@@ -184,6 +199,7 @@ class NCViewer(tk.Tk):
 
         # 分段: 抬刀平面(可用户覆盖) + 段列表 + 段模式
         self._segments = []
+        self._seg_of_line = {}           # 行号 -> 段号 (代码区行号槽标注)
         self._lift_plane = 0.0
         self._lift_auto = True
         self._seg_index = None
@@ -194,6 +210,16 @@ class NCViewer(tk.Tk):
         # 投影缓存: 四元数/过滤条件不变时缩放只做坐标变换 (提速缩放)
         self._proj_cache = None
         self._bbox_cache = None          # (key, bbox) 适配用
+        # 渲染图元复用: 结构(折线颜色/点数序列)不变时仅 coords 更新, 免 delete/create
+        self._path_items = []
+        self._poly_struct = None
+        self._refresh_job = None         # 旋转/滚转刷新合并任务
+        self._drag_coarse = False        # 旋转拖动中圆弧抽稀 (减点提速)
+        self._rot_moved = False
+        # 文件加载进度弹窗: 超过延时的加载才弹窗 (快任务防闪烁)
+        self._prog = None                # {"win","lbl","bar"} | None
+        self._prog_t0 = None
+        self._progress_delay = 0.08
 
         self._build_ui()
         self._bind_canvas()
@@ -235,6 +261,7 @@ class NCViewer(tk.Tk):
         # 窗口级 Configure 在 body 布局定型后触发, 避免中间态覆盖
         self.bind("<Configure>", self._clamp_bottom_sash)
         body.bind("<B1-Motion>", self._clamp_bottom_sash)
+        _class_first_bindtags(body)     # sash 先移动, 钳制后生效
 
         upper = ttk.PanedWindow(body, orient="horizontal")
         body.add(upper, weight=3)
@@ -260,6 +287,7 @@ class NCViewer(tk.Tk):
                                        highlightcolor=theme.ACCENT)
         self.file_listbox.grid(row=2, column=0, sticky="nsew")
         fsb = ttk.Scrollbar(fs_frame, orient="vertical", command=self.file_listbox.yview)
+        self._fs_vsb = fsb        # 供文件栏最小宽度动态测量
         fsb.grid(row=2, column=1, sticky="ns")
         self.file_listbox.config(yscrollcommand=fsb.set)
         self.file_listbox.bind("<<ListboxSelect>>", self._on_file_select)
@@ -331,6 +359,9 @@ class NCViewer(tk.Tk):
                    command=lambda: self._run_to_target(True)).pack(side="left", padx=(6, 0))
         self.target_lbl = ttk.Label(ctl, text="目标行: -", style="Panel.TLabel")
         self.target_lbl.pack(side="left", padx=(10, 0))
+        self.target_clear_btn = ttk.Button(ctl, text="清空", state="disabled",
+                                           command=self._clear_target)
+        self.target_clear_btn.pack(side="left", padx=(6, 0))
 
         self.status = ttk.Label(cv_frame, text="", anchor="w", padding=(4, 2))
         self.status.pack(side="bottom", fill="x")
@@ -428,14 +459,14 @@ class NCViewer(tk.Tk):
         hd = ttk.Frame(posf, style="Panel.TFrame")
         hd.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         _mk_table(hd, ("行", "段"), (8, 8))
-        # 本行: 单行 "本行: xxx"
+        # 本行: 标签行 + 值行 (与其他字段一致的上下表格, 值框整行跨满)
         bl = ttk.Frame(posf, style="Panel.TFrame")
         bl.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        bl.columnconfigure(1, weight=1)
+        bl.columnconfigure(0, weight=1)
         ttk.Label(bl, text="本行", style="Panel.TLabel",
                   font=("", 9, "bold")).grid(row=0, column=0, sticky="w")
         self.pos_fields["本行"] = _mk_entry(bl, 30)
-        self.pos_fields["本行"].grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.pos_fields["本行"].grid(row=1, column=0, sticky="ew")
 
         # 刀具栏: 固定自然高度之外的剩余空间全部给刀具 (最小 240)
         tbar = ttk.LabelFrame(inner, text="刀具", padding=8, style="Panel.TLabelframe")
@@ -452,7 +483,9 @@ class NCViewer(tk.Tk):
         ttk.Button(tbar, text="自定义…", command=self.show_tool_setup).grid(
             row=1, column=1, sticky="w", pady=(4, 0))
         # 剖面图直接内嵌在刀具信息下方 (随刀具栏均分高度伸缩)
-        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=140, highlightthickness=0)
+        # 显式小请求宽: Canvas 默认宽 10cm(≈567px@144DPI) 会撑爆侧栏最小宽度
+        self.tool_cv = tk.Canvas(tbar, bg=theme.PANEL, height=140, width=120,
+                                 highlightthickness=0)
         self.tool_cv.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         self.tool_cv.bind("<Configure>", lambda e: self._draw_tool_profile_inline())
 
@@ -460,17 +493,12 @@ class NCViewer(tk.Tk):
         code_split = ttk.Panedwindow(body, orient="horizontal")
         body.add(code_split, weight=2)
         self.code_split = code_split
-        # 两侧栏最小宽度 (字体测量):
-        #   文件栏 >= 15字符+空余, 统计侧栏 >= 3个11字符单元 (XYZ 完整显示),
-        #   底部右栏(按行定位/搜索/按段) >= 479
-        _mf = tkfont.Font(font=theme.FONT_MONO)
-        self._min_fs = _mf.measure("0" * 15) + 36
-        self._min_side = 3 * (_mf.measure("0" * 11) + 24) + 44
-        self._min_rc = 479
         upper.bind("<B1-Motion>", self._clamp_pane_mins)
         upper.bind("<Configure>", self._clamp_pane_mins, add="+")
         code_split.bind("<B1-Motion>", self._clamp_pane_mins)
         code_split.bind("<Configure>", self._clamp_pane_mins, add="+")
+        _class_first_bindtags(upper)        # sash 先移动, 钳制后生效
+        _class_first_bindtags(code_split)
         code_frame = ttk.Frame(code_split)
         code_split.add(code_frame, weight=3)
         ttk.Label(code_frame, text="NC 代码 (点击行选中目标行)", padding=(4, 2)).pack(side="top", fill="x")
@@ -498,9 +526,11 @@ class NCViewer(tk.Tk):
         self.code.bind("<Button-1>", self._on_code_click, add="+")
         self.code.tag_configure("cur", background="#264f78", foreground="#ffffff")
         self.code.tag_configure("ln", foreground=theme.TEXT_DIM, selectbackground=theme.BG)
+        self.code.tag_configure("segno", foreground="#4ec9b0")
         self.code.tag_configure("search", background="#3a5a3a")
         self.code.tag_configure("searchcur", background="#7a9a3a", foreground="#ffffff")
         self.code.tag_configure("target", background="#3d3d5c", foreground="#ffffff")
+        self.code.tag_configure("viewline", background="#574d1f")   # 查看行 (拾取查看)
         self.code.tag_raise("search")
         self.code.tag_raise("searchcur")
 
@@ -510,11 +540,13 @@ class NCViewer(tk.Tk):
         right.columnconfigure(0, weight=1)
         right.columnconfigure(1, weight=1)
         right.rowconfigure(0, weight=1)
-        lbox, _lcv, lin = _make_scroll_col(right)
+        lbox, lcv, lin = _make_scroll_col(right)
         lbox.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
         lin.columnconfigure(0, weight=1)
-        rbox, _rcv, rin = _make_scroll_col(right)
+        rbox, rcv, rin = _make_scroll_col(right)
         rbox.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        self._rc_canvases = (lcv, rcv)      # 供底部右栏宽度测量/测试
+        self._rc_inners = (lin, rin)
         rin.columnconfigure(0, weight=1)
         rin.rowconfigure(0, weight=1)        # 段列表随右栏高度拉伸
         loc = ttk.LabelFrame(lin, text="按行定位", padding=8, style="Panel.TLabelframe")
@@ -595,9 +627,34 @@ class NCViewer(tk.Tk):
                                       highlightcolor=theme.ACCENT)
         self.seg_listbox.grid(row=0, column=0, sticky="nsew")
         segsb = ttk.Scrollbar(segbox, orient="vertical", command=self.seg_listbox.yview)
+        self._seg_vsb = segsb     # 供全局滚轮分派
         segsb.grid(row=0, column=1, sticky="ns")
         self.seg_listbox.config(yscrollcommand=segsb.set)
         self.seg_listbox.bind("<<ListboxSelect>>", self._on_seg_list_select)
+
+        # ---- 栏宽自适应: 默认 = 内容自然宽(不拥挤), 最小 = 内容地板(最窄不溢出) ----
+        # 全部按运行时真实控件测量, 与 DPI/字体缩放无关
+        self.update_idletasks()     # 先完成几何协商, 容器类控件请求宽才有效
+        _mf = tkfont.Font(font=theme.FONT_MONO)
+        vsb_w = self._fs_vsb.winfo_reqwidth()
+        # 文件栏 >= 文件列表自然宽 + 竖滚动条 + 内边距 (文件名不被过度截断)
+        self._min_fs = self.file_listbox.winfo_reqwidth() + vsb_w + 20
+        # 统计侧栏 >= 3 个 11 字符单元 (当前位置 XYZ 完整显示)
+        self._min_side = 3 * (_mf.measure("0" * 11) + 24) + 44
+        # 底部右栏 >= 两列均分: 每列都须容下较宽列的内容 + 竖滚动条/内边距/间隙
+        self._min_rc = (2 * max(lin.winfo_reqwidth(), rin.winfo_reqwidth())
+                        + 2 * vsb_w + 34)
+        # 默认宽度直接给内容自然宽 (最小宽度钳制仍兜底)
+        fs_frame.config(width=self._min_fs)
+        side.config(width=self._min_side)
+        right.config(width=self._min_rc)
+        # 用户拖动过 sash 后, 加载文件时不再自动改栏宽
+        self._upper_touched = False
+        self._rc_touched = False
+        upper.bind("<B1-Motion>",
+                   lambda e: setattr(self, "_upper_touched", True), add="+")
+        code_split.bind("<B1-Motion>",
+                        lambda e: setattr(self, "_rc_touched", True), add="+")
 
     def _bind_canvas(self):
         self.canvas.bind("<ButtonPress-1>", self._pan_start)
@@ -607,23 +664,48 @@ class NCViewer(tk.Tk):
         self.canvas.bind("<B2-Motion>", self._rot_move)
         self.canvas.bind("<ButtonRelease-2>", self._rot_end)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
-        self.canvas.bind("<Configure>",
-                         lambda e: self._view_refresh() if self.result else None)
-        self.canvas.bind("<Configure>", lambda e: self._place_legend(), add="+")
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         self._pan_data = None
         self._rot_data = None
+        self._rot_mode = "orbit"
+
+    def _on_canvas_configure(self, e):
+        """画布尺寸变化: 场景投影/缩放/偏移均未变, 刀路无需重绘;
+        仅重贴图例 + 重铺十字虚线 (修复窗口拉伸/任务栏还原时的全量重绘卡顿)"""
+        self._place_legend()
+        if self.result and self.current_line is not None:
+            a, b = project(self.result.position_at_line(self.current_line),
+                           self.quat)
+            self._draw_crosshair(*self.world_to_canvas(a, b))
+
+    def _wheel_scroll_target(self, w):
+        """按指针控件沿父链找滚轮滚动目标 (右侧栏 / 底部右栏两列的画布)。
+
+        段列表自身滚轮由其类绑定处理 (返回 None 跳过, 避免双重滚动);
+        段列表的滚动条则滚段列表。其余区域返回 None 不干预。
+        """
+        targets = (self.side_canvas,) + self._rc_canvases
+        while w is not None:
+            if w is self.seg_listbox:
+                return None
+            if w is self._seg_vsb:
+                return self.seg_listbox
+            for cv in targets:
+                if w is cv or w is cv.master:
+                    return cv
+            w = w.master
+        return None
 
     def _on_side_wheel_global(self, e):
-        """全局滚轮: 指针在侧栏内(含各子控件/滚动条)时滚动侧栏, 其余区域不干预"""
+        """全局滚轮: 按指针所在区域滚动对应滚动容器 (右侧栏 / 底部右栏两列,
+        含各子控件与滚动条), 其余区域 (主画布/代码区等) 不干预"""
         try:
             w = self.winfo_containing(e.x_root, e.y_root)
         except tk.TclError:
             return
-        while w is not None:
-            if w is self.side_canvas or w is self.side_canvas.master:
-                self.side_canvas.yview_scroll(-1 * (e.delta // 120), "units")
-                return
-            w = w.master
+        target = self._wheel_scroll_target(w)
+        if target is not None:
+            target.yview_scroll(-1 * (e.delta // 120), "units")
 
     def _apply_default_sash(self):
         """默认 sash: 底部大栏自适应 (小屏 25% 保底, 1080p 更高, 大屏 35%)"""
@@ -653,7 +735,7 @@ class NCViewer(tk.Tk):
             pass
 
     def _clamp_pane_mins(self, e):
-        """两侧栏最小宽度 (画布优先被压缩): 文件栏≥15字符, 统计侧栏≥3×11字符, 底部右栏≥479"""
+        """两侧栏最小宽度 (画布优先被压缩): 文件栏≥列表自然宽, 统计侧栏≥3×11字符, 底部右栏≥两列自然宽"""
         try:
             up = self.upper_pane
             uw = up.winfo_width()
@@ -669,8 +751,83 @@ class NCViewer(tk.Tk):
         except tk.TclError:
             pass
 
+    def _fit_pane_widths(self):
+        """按内容自然宽设置栏宽 (加载文件后调用; 用户拖过 sash 则保持不动)。
+
+        统计侧栏内容随程序变化 (S/F 档位列表等): 内容变宽超出视口时把
+        侧栏加宽到内容自然宽, 避免横向滚动; 上限为上层窗格宽度的 45%。
+        """
+        try:
+            if not self._upper_touched:
+                uw = self.upper_pane.winfo_width()
+                if uw > 100:
+                    vsb_w = self._fs_vsb.winfo_reqwidth()
+                    side_w = max(self._min_side,
+                                 self._side_inner.winfo_reqwidth() + vsb_w + 24)
+                    side_w = min(side_w, int(uw * 0.45))
+                    self.upper_pane.sashpos(0, self._min_fs)
+                    self.upper_pane.sashpos(1, uw - side_w)
+            if not self._rc_touched:
+                cw = self.code_split.winfo_width()
+                if cw > 100:
+                    self.code_split.sashpos(0, cw - self._min_rc)
+        except tk.TclError:
+            pass
+
 
     # ------------- 文件 -------------
+    def _progress_begin(self):
+        """开始一个可能较长的加载: 超过 _progress_delay 秒未完成则弹进度窗"""
+        self._prog_t0 = time.time()
+        self._prog = None
+
+    def _progress_create(self):
+        """创建加载进度弹窗 (模态, 居中于主窗口, 加载中禁止关闭)"""
+        win = tk.Toplevel(self)
+        win.title("加载文件")
+        win.configure(bg=theme.BG)
+        win.transient(self)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        frm = ttk.Frame(win, padding=14, style="Panel.TFrame")
+        frm.pack(fill="both", expand=True)
+        lbl = ttk.Label(frm, text="读取文件…", style="Panel.TLabel")
+        lbl.pack(anchor="w")
+        bar = ttk.Progressbar(frm, mode="determinate", length=380, maximum=100)
+        bar.pack(fill="x", pady=(8, 0))
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_reqheight()) // 3
+        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        try:
+            win.grab_set()                # 模态: 加载期间不与主窗口交互
+        except tk.TclError:
+            pass                          # 窗口未映射等环境 (测试) 允许无 grab
+        return {"win": win, "lbl": lbl, "bar": bar}
+
+    def _progress_update(self, text, frac):
+        """更新加载进度; 首次超延时才创建弹窗; 仅重绘不处理输入 (加载原子完成)"""
+        if self._prog is None:
+            if self._prog_t0 is None:
+                return
+            if time.time() - self._prog_t0 < self._progress_delay:
+                return
+            self._prog = self._progress_create()
+        self._prog["lbl"].config(text=text)
+        self._prog["bar"].config(value=max(0.0, min(1.0, frac)) * 100)
+        self._prog["win"].update_idletasks()
+
+    def _progress_end(self):
+        """关闭进度弹窗 (幂等)"""
+        if self._prog is not None:
+            try:
+                self._prog["win"].grab_release()
+                self._prog["win"].destroy()
+            except tk.TclError:
+                pass
+            self._prog = None
+        self._prog_t0 = None
+
     def open_file_multi(self):
         """弹出文件选择框(可多选), 加载所有选中文件并切换到第一个"""
         initdir = _sample_dir()
@@ -691,47 +848,74 @@ class NCViewer(tk.Tk):
         self.add_files([path])
 
     def add_files(self, paths):
-        """解析并缓存多个文件, 刷新文件栏, 切换到第一个新加载文件"""
+        """解析并缓存多个文件, 刷新文件栏, 切换到第一个新加载文件。
+
+        分阶段 (读取/解析/离散刀路/载入界面) 驱动加载进度弹窗;
+        读取失败的消息在加载结束关闭弹窗后统一弹出 (避免模态抢占)。
+        """
         new_paths = []
-        for path in paths:
-            if path in self.file_items:
-                continue
-            try:
-                with open(path, encoding="utf-8", errors="ignore") as fh:
-                    text = fh.read()
-            except OSError as e:
-                messagebox.showerror("打开失败", str(e))
-                continue
-            result = parse_nc(text)
-            self.file_items[path] = {
-                "path": path,
-                "text": text,
-                "lines": text.splitlines(),
-                "result": result,
-                "palette": build_palette(result.feeds),
-                "move_by_line": {m.line_number: m for m in result.moves},
+        errors = []
+        paths = [p for p in paths if p not in self.file_items]
+        n = len(paths)
+        self._progress_begin()
+        try:
+            for idx, path in enumerate(paths):
+                name = os.path.basename(path)
+                base = idx / n
+                self._progress_update(f"读取 {name} ({idx + 1}/{n})", base)
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        text = fh.read()
+                except OSError as e:
+                    errors.append(str(e))
+                    continue
+                self._progress_update(f"解析 {name} ({idx + 1}/{n})",
+                                      base + 0.2 / n)
+                result = parse_nc(text)
+                moves = result.moves
                 # 渲染前一次性离散所有刀路段(含圆弧), 避免旋转时反复重算
-                "disp3d": [move_points_3d(m, max_seg=4) for m in result.moves],
-                "move_index": {id(m): i for i, m in enumerate(result.moves)},
-                # 程序从第一个可解析点开始: 跳过从原点出发的起始进给段
-                "lead_skip": _compute_lead_skip(result.moves),
-                # 刀具: 从同目录/同名 aptsource 头部解析 (无则 None)
-                "tool": self._parse_tool_for(path, text),
-            }
-            new_paths.append(path)
-        if not new_paths:
-            return
-        self._refresh_file_list()
-        # 默认加载第一个数控程序; 仅导入 apt 时只更新刀具信息
-        first_mpf = next((p for p in new_paths
-                          if not p.lower().endswith((".aptsource", ".apt"))), None)
-        if first_mpf:
-            self.set_current_file(first_mpf)
-        else:
-            item = self.file_items[new_paths[0]]
-            self.tool = (self.custom_tool if self.custom_tool is not None
-                         else item["tool"])
-            self._refresh_tool_ui()
+                disp3d = []
+                step = max(1, len(moves) // 8)
+                for j, m in enumerate(moves):
+                    disp3d.append(move_points_3d(m, max_seg=4))
+                    if j % step == 0:
+                        self._progress_update(
+                            f"离散刀路 {name} ({idx + 1}/{n})",
+                            base + (0.2 + 0.7 * j / len(moves)) / n)
+                self.file_items[path] = {
+                    "path": path,
+                    "text": text,
+                    "lines": text.splitlines(),
+                    "result": result,
+                    "palette": build_palette(result.feeds),
+                    "move_by_line": {m.line_number: m for m in moves},
+                    "disp3d": disp3d,
+                    "move_index": {id(m): i for i, m in enumerate(moves)},
+                    # 程序从第一个可解析点开始: 跳过从原点出发的起始进给段
+                    "lead_skip": _compute_lead_skip(moves),
+                    # 刀具: 从同目录/同名 aptsource 头部解析 (无则 None)
+                    "tool": self._parse_tool_for(path, text),
+                }
+                new_paths.append(path)
+            if not new_paths:
+                return
+            self._refresh_file_list()
+            # 默认加载第一个数控程序; 仅导入 apt 时只更新刀具信息
+            first_mpf = next((p for p in new_paths
+                              if not p.lower().endswith((".aptsource", ".apt"))), None)
+            if first_mpf:
+                self._progress_update(
+                    "载入界面 " + os.path.basename(first_mpf), 0.95)
+                self.set_current_file(first_mpf)
+            else:
+                item = self.file_items[new_paths[0]]
+                self.tool = (self.custom_tool if self.custom_tool is not None
+                             else item["tool"])
+                self._refresh_tool_ui()
+        finally:
+            self._progress_end()
+        for err in errors:
+            messagebox.showerror("打开失败", err)
 
     @staticmethod
     def _parse_tool_for(path, text):
@@ -856,14 +1040,14 @@ class NCViewer(tk.Tk):
         self._trace_active = False
         self._trace_drawn = 0
         self._trace_items = []
-        self._target_line = None
-        self.target_lbl.config(text="目标行: -")
+        self._clear_target()
+        self._seg_checked = set()      # 勾选段随程序重建, 防上个程序的越界索引
         self.file_lbl.config(text=os.path.basename(path))
-        self._fill_code()
+        self._recompute_segments()     # 段号映射 + 代码区填充 (含段号标注)
         self._fill_legend()
         self._fill_stats()
         self._refresh_tool_ui()
-        self._recompute_segments()
+        self._fit_pane_widths()      # 栏宽按新内容自然宽适配
         self.fit_view()
         # 布局稳定后 (sash/窗口定型) 再自动适配一次, 保证图像大小合适
         self.after(700, lambda: self.fit_view() if self.result else None)
@@ -896,6 +1080,7 @@ class NCViewer(tk.Tk):
         for f, col in self.palette.items():
             self.code.tag_configure(self._f_tag(f), foreground=col)
         move_by_line = self.move_by_line
+        seg_of_line = self._seg_of_line
         # 单次批量插入 (文本+标签成对), 大程序填充提速 (实测最优)
         parts = []
         for i, line in enumerate(self.lines, 1):
@@ -906,8 +1091,15 @@ class NCViewer(tk.Tk):
                 tag = "g0"
             else:
                 tag = self._f_tag(m.feed)
-            parts.append(f"{i:5d}| ")
+            parts.append(f"{i:5d}|")
             parts.append("ln")
+            segno = seg_of_line.get(i)       # 行号槽段号标注 (段外行留空)
+            if segno:
+                parts.append("%-4s" % ("S%d" % segno))
+                parts.append("segno")
+            else:
+                parts.append("    ")
+                parts.append("ln")
             parts.append(line + "\n")
             parts.append(tag)
         self.code.insert("end", *parts)
@@ -1453,6 +1645,14 @@ class NCViewer(tk.Tk):
         else:
             self.render()
 
+    def _view_refresh_soon(self):
+        """合并连续视图刷新请求 (旋转/滚转拖动逐事件全量渲染会积压掉帧)"""
+        if self._refresh_job is None:
+            def run():
+                self._refresh_job = None
+                self._view_refresh()
+            self._refresh_job = self.after_idle(run)
+
     def fit_view(self):
         if not self.result or not self.result.moves:
             return
@@ -1500,21 +1700,29 @@ class NCViewer(tk.Tk):
                         flat[i] = mx + (flat[i] - mx) * factor
                         flat[i + 1] = my + (flat[i + 1] - my) * factor
             self._place_legend()
+            # 屏幕像素尺寸的标记类图元不随缩放变化: 重绘
+            # (方向箭头固定 14px / 当前点 6px / 十字虚线铺满可视区)
+            self.canvas.delete("cur", "curseg", "toolmodel")
+            self._draw_current()
+            self._draw_tool_model()
 
     def render(self):
         self._trace_active = False        # 全量渲染即退出轨迹演示
-        self.canvas.delete("all")
         if not self.result or not self.result.moves:
+            self.canvas.delete("all")
+            self._path_items = []
+            self._poly_struct = None
             return
         w, x, y, z = self.quat
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
         show_g0 = self.show_g0.get()
         palette = self.palette
+        coarse = self._drag_coarse        # 旋转/滚转拖动中: 圆弧抽稀提速
         # 预计算四元数系数 (省去每点 2 倍乘)
         a2, b2, c2 = 2.0 * y, 2.0 * z, 2.0 * x
 
         key = (id(self.result), w, x, y, z, self._seg_filter, show_g0,
-               self._lead_skip)
+               self._lead_skip, coarse)
         if self._proj_cache is not None and self._proj_cache[0] == key:
             # 四元数/过滤未变: 复用缓存投影, 仅重算缩放偏移 (缩放提速)
             polylines = []
@@ -1525,7 +1733,7 @@ class NCViewer(tk.Tk):
                     coords[i + 1] = -base[i + 1] * scale + oy
                 polylines.append([color, coords])
         else:
-            # 内联四元数投影 + 相邻同色合并为折线(扁平坐标列表)
+            # 内联四元数投影 + 相邻同色且连续的移动合并为折线(扁平坐标列表)
             polylines = []
             base_store = []      # 缓存: 不含缩放偏移的世界投影坐标
             for i, (m, pts3d) in enumerate(zip(self.result.moves, self._disp3d)):
@@ -1536,6 +1744,8 @@ class NCViewer(tk.Tk):
                 if m.motion == "G0" and not show_g0:
                     continue
                 color = color_of_move(m, palette)
+                if coarse and len(pts3d) > 4:   # 拖动中抽稀: 圆弧减半采样
+                    pts3d = pts3d[::2] + [pts3d[-1]]
                 coords = []
                 base = []
                 ap = coords.append
@@ -1550,7 +1760,10 @@ class NCViewer(tk.Tk):
                     ap(-vy * scale + oy)
                     bp(vx)
                     bp(vy)
-                if polylines and polylines[-1][0] == color:
+                # 相邻且连续(共享端点)的同色移动才合并折线; 段过滤产生的
+                # 间隙处必须另起新线, 否则会画出幻影连接线
+                if (polylines and polylines[-1][0] == color
+                        and polylines[-1][1][-2:] == coords[:2]):
                     polylines[-1][1].extend(coords[2:])
                     base_store[-1][1].extend(base[2:])
                 else:
@@ -1558,12 +1771,26 @@ class NCViewer(tk.Tk):
                     base_store.append([color, base])
             self._proj_cache = (key, base_store)
 
-        for color, pts in polylines:
-            if len(pts) < 4:
-                continue
-            self.canvas.create_line(pts, fill=color, width=1, joinstyle="round",
-                                    capstyle="round", tags="path")
+        polylines = [pl for pl in polylines if len(pl[1]) >= 4]
+        # 结构未变 (同文件/过滤/G0/抽稀档位): 复用画布图元仅 coords 更新,
+        # 免 delete/create 开销 (25k 段实测 31ms -> 8ms)
+        struct = [(c, len(pts)) for c, pts in polylines]
+        if struct == self._poly_struct:
+            for item, (color, pts) in zip(self._path_items, polylines):
+                self.canvas.coords(item, *pts)
+        else:
+            self.canvas.delete("path")
+            items = []
+            ap = items.append
+            for color, pts in polylines:
+                ap(self.canvas.create_line(pts, fill=color, width=1,
+                                           joinstyle="round", capstyle="round",
+                                           tags="path"))
+            self._path_items = items
+            self._poly_struct = struct
 
+        # 标记类图元数量小, 删除重建
+        self.canvas.delete("axes", "cur", "curseg", "toolmodel")
         self._draw_axes()
         self._draw_current()
         self._draw_tool_model()
@@ -1603,11 +1830,11 @@ class NCViewer(tk.Tk):
         a, b = project(pos, q)
         cx, cy = self.world_to_canvas(a, b)
 
-        # 当前段高亮 + 加工方向箭头 (前导跳过段不显示高亮)
+        # 当前段高亮 + 加工方向箭头 (前导跳过段/被段过滤的移动不高亮, 防残留)
         m = self.move_by_line.get(self.current_line)
         if m is not None and not (m.motion == "G0" and not self.show_g0.get()):
             idx = self._move_index[id(m)]
-            if idx < self._lead_skip:
+            if idx < self._lead_skip or self._move_filtered(idx):
                 m = None
         if m is not None:
             pts = [self.world_to_canvas(*project(p, q)) for p in self._disp3d[idx]]
@@ -1616,14 +1843,21 @@ class NCViewer(tk.Tk):
                                         tags="curseg")
                 self._draw_move_direction(pts)
 
-        # 十字线
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        self.canvas.create_line(cx, 0, cx, ch, fill=CUR_COLOR, dash=(4, 4), tags="cur")
-        self.canvas.create_line(0, cy, cw, cy, fill=CUR_COLOR, dash=(4, 4), tags="cur")
+        # 十字线 (铺满可视区; 平移后由 _draw_crosshair 重铺)
+        self._draw_crosshair(cx, cy)
         # 当前点
         self.canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6,
                                 fill=CUR_COLOR, outline="#000000", width=2, tags="cur")
+
+    def _draw_crosshair(self, cx, cy):
+        """当前位置十字虚线: 铺满可视区两端 (平移把图元移出边界, 需重铺)"""
+        self.canvas.delete("curx")
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        self.canvas.create_line(cx, 0, cx, ch, fill=CUR_LINE_COLOR,
+                                dash=(4, 4), tags=("cur", "curx"))
+        self.canvas.create_line(0, cy, cw, cy, fill=CUR_LINE_COLOR,
+                                dash=(4, 4), tags=("cur", "curx"))
 
     def _draw_move_direction(self, pts):
         """沿当前段路径绘制箭头, 表示刀具加工方向。
@@ -1669,7 +1903,10 @@ class NCViewer(tk.Tk):
         self.canvas.create_polygon(x, y, b1x, b1y, b2x, b2y,
                                    fill=color, outline="#000000", width=1, tags="cur")
 
-    # ------------- 交互: 平移/缩放 -------------
+    # ------------- 交互: 平移/缩放 + 点击拾取 -------------
+    PICK_MAX_PX = 12.0        # 拾取/旋转吸附模型点的最大像素距离
+    CLICK_MAX_MOVE_PX = 4.0   # 按下与释放位移在此内视为单击 (而非拖动平移)
+
     def _pan_start(self, e):
         # 记录起点、原始偏移、上一次位置(用于增量位移)
         self._pan_data = (e.x, e.y, self.offset[0], self.offset[1], e.x, e.y)
@@ -1691,13 +1928,105 @@ class NCViewer(tk.Tk):
                     flat[i + 1] += dy
         self.offset = (ox + (e.x - sx), oy + (e.y - sy))
         self._pan_data = (sx, sy, ox, oy, e.x, e.y)
+        if self.result and self.current_line is not None:
+            # 十字虚线被平移移出可视区: 按当前位置重铺到两端
+            a, b = project(self.result.position_at_line(self.current_line),
+                           self.quat)
+            self._draw_crosshair(*self.world_to_canvas(a, b))
 
     def _pan_end(self, e):
+        if self._pan_data:
+            sx, sy = self._pan_data[0], self._pan_data[1]
+            if max(abs(e.x - sx), abs(e.y - sy)) <= self.CLICK_MAX_MOVE_PX:
+                self._click_pick(e.x, e.y)     # 单击 (未拖动): 拾取刀路跳转
         self._pan_data = None
 
-    # ------------- 交互: 中键旋转 (轨道球, CATIA 风格) -------------
-    PICK_MAX_PX = 12.0   # 点击处吸附模型点的最大像素距离
+    def _click_pick(self, mx, my):
+        """画布单击拾取。命中刀路: 轨迹/播放状态仅查看对应行 (代码高亮+
+        位置字段, 执行位置不动, 续播从停下处继续), 非轨迹状态跳转到该行。
+        未命中: 轨迹状态取消查看 (执行位置保留), 否则清除当前选择。"""
+        idx = self._pick_move_index(mx, my)
+        if idx is None:
+            if self._trace_active:
+                self._cancel_view()
+            else:
+                self._clear_current()
+            return
+        ln = self.result.moves[idx].line_number
+        if self._trace_active:
+            self._view_line(ln)
+        else:
+            self.set_current_line(ln)
 
+    def _view_line(self, ln):
+        """仅查看某行 (不改变执行位置): 代码区查看高亮 + 位置字段显示其值"""
+        self.code.tag_remove("viewline", "1.0", "end")
+        self.code.tag_add("viewline", "%d.0" % ln, "%d.end" % ln)
+        self.code.see("%d.0" % ln)
+        self._update_pos_info(ln)
+
+    def _cancel_view(self):
+        """取消查看行 (轨迹模式点空白): 清除查看高亮, 字段回到执行位置"""
+        self.code.tag_remove("viewline", "1.0", "end")
+        if self.current_line is not None:
+            self._update_pos_info(self.current_line)
+
+    def _clear_current(self):
+        """清除当前位置选择: 画布标记 (十字/高亮/箭头) /位置字段/代码高亮"""
+        self.current_line = None
+        self.canvas.delete("cur", "curseg", "toolmodel")
+        self._draw_tool_model()           # 无当前行时刀具模型回退到原点显示
+        self.code.tag_remove("cur", "1.0", "end")
+        self.code.tag_remove("viewline", "1.0", "end")
+        for key in ("X", "Y", "Z", "S", "F", "G", "行", "段", "本行"):
+            self._set_field(self.pos_fields[key], "-")
+        self.loc_entry.delete(0, "end")
+
+    def _pick_move_index(self, mx, my, max_dist=PICK_MAX_PX):
+        """拾取距 (mx,my) max_dist 像素内最近的可见刀路移动, 返回移动索引或 None。
+
+        按到折线段的距离判定 (非仅顶点), 长直线段中点也可点中;
+        前导跳过段/段过滤/隐藏 G0 不参与拾取; 轨迹模式只能点中已绘制部分
+        (画面内没有的刀路不能被选中)。
+        """
+        if not self.result:
+            return None
+        w, x, y, z = self.quat
+        scale, ox, oy = self.scale, self.offset[0], self.offset[1]
+        a2, b2, c2 = 2.0 * y, 2.0 * z, 2.0 * x   # 预计算四元数系数
+        show_g0 = self.show_g0.get()
+        best = None
+        best_sq = max_dist * max_dist
+        moves = self.result.moves
+        limit = len(self._disp3d)
+        if self._trace_active:
+            limit = min(limit, self._trace_drawn)   # 仅已绘制部分可点
+        for i in range(self._lead_skip, limit):
+            if self._move_filtered(i):
+                continue
+            m = moves[i]
+            if m.motion == "G0" and not show_g0:
+                continue
+            prev_sx = prev_sy = None
+            for px, py, pz in self._disp3d[i]:
+                tx = a2 * pz - b2 * py
+                ty = b2 * px - c2 * pz
+                tz = c2 * py - a2 * px
+                vx = px + w * tx + y * tz - z * ty
+                vy = py + w * ty + z * tx - x * tz
+                sx = vx * scale + ox
+                sy = -vy * scale + oy
+                if prev_sx is not None:
+                    d = point_seg_dist_sq(mx, my, prev_sx, prev_sy, sx, sy)
+                    if d < best_sq:
+                        best_sq = d
+                        best = i
+                        if d < 0.25:      # 0.5px 内直接命中, 提前结束
+                            return best
+                prev_sx, prev_sy = sx, sy
+        return best
+
+    # ------------- 交互: 中键旋转 (轨道球, CATIA 风格) -------------
     def _pick_model_point(self, mx, my, max_dist=PICK_MAX_PX):
         """拾取鼠标位置 max_dist 像素内最近的模型点; 若无则返回 None。
 
@@ -1724,19 +2053,30 @@ class NCViewer(tk.Tk):
     def _rot_start(self, e):
         if not self.result:
             return
-        # 旋转中心 = 点击处真正落在刀路上的点; 否则锚定在点击处反投影点(包围盒 z 中心深度)
+        # 吸附到刀路点 -> 轨道旋转; 未吸附 (空白处) -> 平面旋转 (滚转, 绕画布中心)
         c = self._pick_model_point(e.x, e.y)
         if c is None:
-            wx, wy = self.canvas_to_world(e.x, e.y)
+            cx = max(self.canvas.winfo_width(), 1) / 2
+            cy = max(self.canvas.winfo_height(), 1) / 2
+            wx, wy = self.canvas_to_world(cx, cy)
             *_, minz, ___, maxz = self.result.bbox
             c = (wx, wy, (minz + maxz) / 2)
+            self._rot_mode = "roll"
+            self._rot_anchor = (cx, cy)        # 滚转锚点 = 画布中心
+        else:
+            self._rot_mode = "orbit"
         self._rot_center = c
         self._rot_data = (e.x, e.y)   # 记录上一鼠标位置, 用于计算增量拖动
+        self._rot_moved = False
+        self._drag_coarse = True      # 拖动中抽稀绘制 (释放后恢复全量)
 
     def _rot_move(self, e):
         if self._rot_data is None:
             return
         px, py = self._rot_data
+        if self._rot_mode == "roll":
+            self._roll_move(e, px, py)
+            return
         dx, dy = e.x - px, e.y - py
         if dx == 0 and dy == 0:
             return
@@ -1747,10 +2087,42 @@ class NCViewer(tk.Tk):
                                         self.scale, self.offset)
         self.quat = new_quat
         self._rot_data = (e.x, e.y)
-        self._view_refresh()
+        self._rot_moved = True
+        self._view_refresh_soon()
+
+    def _roll_move(self, e, px, py):
+        """平面旋转 (滚转): 画面绕画布中心跟随鼠标转角转动, 中心固定不动"""
+        ax, ay = self._rot_anchor
+        v1x, v1y = px - ax, py - ay
+        v2x, v2y = e.x - ax, e.y - ay
+        if math.hypot(v1x, v1y) < 10 or math.hypot(v2x, v2y) < 10:
+            self._rot_data = (e.x, e.y)      # 距锚点太近角度不稳, 只更新位置
+            return
+        # 屏幕(y 向下)转角取负 -> 视觉同向 (画面跟着鼠标绕锚点转)
+        d = -(math.atan2(v2y, v2x) - math.atan2(v1y, v1x))
+        if d > math.pi:
+            d -= 2 * math.pi
+        elif d < -math.pi:
+            d += 2 * math.pi
+        dq = quat_from_axis_angle(0.0, 0.0, 1.0, d)   # 绕视轴 (屏幕法向)
+        new_quat = quat_normalize(quat_mul(dq, self.quat))
+        self.offset = compensate_center(self._rot_center, self.quat, new_quat,
+                                        self.scale, self.offset)
+        self.quat = new_quat
+        self._rot_data = (e.x, e.y)
+        self._rot_moved = True
+        self._view_refresh_soon()
 
     def _rot_end(self, e):
+        moved = self._rot_moved
         self._rot_data = None
+        self._rot_moved = False
+        self._drag_coarse = False               # 恢复全量绘制
+        if self._refresh_job is not None:
+            self.after_cancel(self._refresh_job)
+            self._refresh_job = None
+        if moved and self.result:
+            self._view_refresh()              # 释放后的最终全量帧
 
     def _on_wheel(self, e):
         factor = 1.2 if e.delta > 0 else 1 / 1.2
@@ -1803,7 +2175,7 @@ class NCViewer(tk.Tk):
         else:
             self.render()
         self._update_pos_info(ln)
-        self._highlight_code_line(ln)
+        self._highlight_code_line(ln, center=animate)   # 播放时当前行居中
         self.loc_entry.delete(0, "end")
         self.loc_entry.insert(0, str(ln))
 
@@ -1830,12 +2202,22 @@ class NCViewer(tk.Tk):
         line_text = self.lines[ln - 1] if 1 <= ln <= len(self.lines) else ""
         self._set_field(self.pos_fields["本行"], line_text)
 
-    def _highlight_code_line(self, ln):
+    def _highlight_code_line(self, ln, center=False):
         self.code.tag_remove("cur", "1.0", "end")
+        self.code.tag_remove("viewline", "1.0", "end")   # 执行位置移动, 查看高亮失效
         start = f"{ln}.0"
         end = f"{ln}.end"
         self.code.tag_add("cur", start, end)
-        self.code.see(start)
+        if center:
+            # 播放中当前行保持在代码区中间 (开头/结尾不足半屏时自然贴边)
+            if self._code_line_h is None:
+                self._code_line_h = tkfont.Font(
+                    font=self.code["font"]).metrics("linespace")
+            vis = max(1, int(self.code.winfo_height() / self._code_line_h))
+            total = max(1, len(self.lines))
+            self.code.yview_moveto(max(0.0, (ln - vis / 2.0) / total))
+        else:
+            self.code.see(start)
         self.code.mark_set("insert", start)
 
     # ------------- 搜索定位 -------------
@@ -1883,7 +2265,14 @@ class NCViewer(tk.Tk):
             return
         ln = int(idx.split(".")[0])
         ln = max(1, min(ln, len(self.lines)))
-        self._set_target(ln)
+        self._toggle_target(ln)
+
+    def _toggle_target(self, ln):
+        """点击代码行: 选中目标行; 再点同一行则取消选中"""
+        if self._target_line == ln:
+            self._clear_target()
+        else:
+            self._set_target(ln)
 
     def _set_target(self, ln):
         """点击代码行 = 选中目标行 (执行位置不动, 目标行高亮)"""
@@ -1892,14 +2281,23 @@ class NCViewer(tk.Tk):
         self.code.tag_add("target", f"{ln}.0", f"{ln}.end")
         self.code.tag_raise("target")
         self.target_lbl.config(text=f"目标行: {ln}")
+        self.target_clear_btn.config(state="normal")
+
+    def _clear_target(self):
+        """清空目标行 (再点同一行或「清空」按钮)"""
+        self._target_line = None
+        self.code.tag_remove("target", "1.0", "end")
+        self.target_lbl.config(text="目标行: -")
+        self.target_clear_btn.config(state="disabled")
 
     # ------------- 分段 (按段浏览) -------------
     def _recompute_segments(self):
-        """重算分段 (文件加载或抬刀平面修改时)"""
+        """重算分段 (文件加载或抬刀平面修改时), 并重建代码区段号标注"""
         if not self.result:
             self._segments = []
             self._lift_plane = 0.0
             self._seg_index = None
+            self._seg_of_line = {}
         else:
             lift = (compute_lift_plane(self.result.moves) if self._lift_auto
                     else self._lift_plane)
@@ -1909,8 +2307,29 @@ class NCViewer(tk.Tk):
                 self._seg_index = 0
             elif self._seg_index is not None and self._seg_index >= len(self._segments):
                 self._seg_index = len(self._segments) - 1 if self._segments else None
+            seg_of_line = {}
+            for n, s in enumerate(self._segments, 1):
+                for ln in range(s.start_line, s.end_line + 1):
+                    seg_of_line[ln] = n
+            self._seg_of_line = seg_of_line
         self._update_seg_ui()
+        self._refresh_code_segments()
         self._apply_seg_filter()
+
+    def _refresh_code_segments(self):
+        """分段变化后重建代码区 (行号槽段号标注), 恢复当前行/目标行/搜索高亮"""
+        if not self.lines:
+            return
+        self._fill_code()
+        if self.current_line is not None:
+            self._highlight_code_line(self.current_line)
+        if self._target_line is not None:
+            self.code.tag_add("target", "%d.0" % self._target_line,
+                              "%d.end" % self._target_line)
+        if self._search_pattern:
+            self._apply_search_tags()
+            if self._search_idx >= 0:
+                self._highlight_search_current()
 
     def _seg_line_bounds(self):
         """段模式下勾选段的并集行范围; 无段模式返回全局"""
@@ -1932,8 +2351,8 @@ class NCViewer(tk.Tk):
         return not any(lo <= i <= hi for lo, hi in self._seg_filter)
 
     def _checked_segments(self):
-        """勾选的段索引列表 (排序)"""
-        return sorted(self._seg_checked)
+        """勾选的段索引列表 (排序, 忽略上个程序残留的越界索引)"""
+        return sorted(i for i in self._seg_checked if i < len(self._segments))
 
     def _sync_checked_from_listbox(self):
         self._seg_checked = set(self.seg_listbox.curselection())
@@ -1945,8 +2364,9 @@ class NCViewer(tk.Tk):
                 return i
         return 0
 
-    def _update_seg_ui(self):
-        """刷新按段浏览面板 (含所有段列表)"""
+    def _update_seg_ui(self, scroll_to=True):
+        """刷新按段浏览面板 (含所有段列表); scroll_to=False 用于列表点击路径
+        (列表保持滚动位置, 不再 see 到当前段)"""
         n = len(self._segments)
         if n and self._seg_index is not None:
             seg = self._segments[self._seg_index]
@@ -1960,7 +2380,7 @@ class NCViewer(tk.Tk):
         self.lift_entry.insert(0, f"{self._lift_plane:g}")
         # 所有段列表 (多选勾选, 点击切换勾选; 重建时保留勾选状态)
         self._refresh_seg_list_marks()
-        if n and self._seg_index is not None:
+        if scroll_to and n and self._seg_index is not None:
             self.seg_listbox.see(self._seg_index)
 
     def _on_seg_list_select(self, e):
@@ -1972,7 +2392,7 @@ class NCViewer(tk.Tk):
         if self._seg_only.get():
             self._stop_playback()
             self._apply_seg_filter()
-            self._update_seg_ui()
+            self._update_seg_ui(scroll_to=False)
 
     def _set_checked(self, idx, on=True):
         """设置段勾选状态"""
@@ -1989,17 +2409,21 @@ class NCViewer(tk.Tk):
         if self._seg_only.get():
             self._stop_playback()
             self._apply_seg_filter()
-            self._update_seg_ui()
+            self._update_seg_ui(scroll_to=False)
 
     def _refresh_seg_list_marks(self):
-        """按勾选状态重建段列表 [x]/[ ] 标记 (Listbox 无 text itemconfig)"""
+        """按勾选状态重建段列表 [x]/[ ] 标记 (Listbox 无 text itemconfig)。
+        重建前后保持滚动位置, 否则点击后列表跳走、再次点击落错行"""
+        ytop = self.seg_listbox.yview()[0]
         self.seg_listbox.delete(0, "end")
         for i, s in enumerate(self._segments):
             mark = "[x]" if i in self._seg_checked else "[ ]"
             self.seg_listbox.insert(
                 "end", f"{mark} {i + 1}: 行{s.start_line}~{s.end_line} Z{s.z_min:g}")
         for i in self._seg_checked:
-            self.seg_listbox.selection_set(i)
+            if i < len(self._segments):
+                self.seg_listbox.selection_set(i)
+        self.seg_listbox.yview_moveto(ytop)
 
     def _apply_lift(self):
         """用户修改抬刀平面并自动重算分段"""
@@ -2021,6 +2445,7 @@ class NCViewer(tk.Tk):
 
     def _apply_seg_filter(self, refresh=True):
         """根据「仅显示勾选段」设置渲染过滤 (勾选段并集; 全选=不过滤, 全不选=空)"""
+        old_filter = self._seg_filter
         if self._seg_only.get() and self._segments:
             sel = self._checked_segments()
             if not sel:
@@ -2035,7 +2460,11 @@ class NCViewer(tk.Tk):
         if self.result:
             self._fill_stats()            # 段模式: 统计随勾选段刷新
             if refresh:
-                self._view_refresh()
+                if self._trace_active and self._seg_filter != old_filter:
+                    # 段过滤变化使渐进轨迹失效: 全量渲染 (否则新勾选段不显示)
+                    self.render()
+                else:
+                    self._view_refresh()
 
     def _toggle_seg_only(self):
         self._stop_playback()
@@ -2217,6 +2646,8 @@ class NCViewer(tk.Tk):
     def _trace_begin(self):
         """开始轨迹演示: 清空已绘刀路, 从第一个可解析点起按行绘制"""
         self.canvas.delete("path")
+        self._path_items = []             # 渲染图元复用结构失效
+        self._poly_struct = None
         self._trace_active = True
         self._trace_drawn = self._trace_base()
         self._trace_items = []
@@ -2232,6 +2663,8 @@ class NCViewer(tk.Tk):
         """用当前四元数/缩放/偏移重绘已画轨迹 (旋转/缩放/适配时不退出轨迹模式)"""
         drawn = self._trace_drawn
         self.canvas.delete("axes", "path", "cur", "curseg", "toolmodel")
+        self._path_items = []             # 渲染图元复用结构失效
+        self._poly_struct = None
         self._draw_axes()
         self._trace_items = []
         self._trace_drawn = self._trace_base()
@@ -2241,7 +2674,11 @@ class NCViewer(tk.Tk):
             self._draw_tool_model()
 
     def _trace_draw_to(self, k):
-        """增量绘制移动 0..k (前进追加, 后退整段重绘)"""
+        """增量绘制移动 0..k (前进追加, 后退整段重绘)。
+
+        canvas.coords 在循环结束后统一回写: 逐移动回写会把合并折线的全量
+        坐标反复传输 ("绘制到结尾"等大跳变为 O(n^2), 大程序明显卡顿)。
+        """
         if k < self._trace_drawn:
             for _, item, _ in self._trace_items:
                 self.canvas.delete(item)
@@ -2251,6 +2688,7 @@ class NCViewer(tk.Tk):
         show_g0 = self.show_g0.get()
         w, x, y, z = self.quat
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
+        dirty = set()
         for i in range(self._trace_drawn, k + 1):
             m = moves[i]
             if self._move_filtered(i):
@@ -2258,8 +2696,11 @@ class NCViewer(tk.Tk):
             if m.motion == "G0" and not show_g0:
                 continue
             color = color_of_move(m, self.palette)
+            pts3d = self._disp3d[i]
+            if self._drag_coarse and len(pts3d) > 4:   # 拖动中抽稀: 圆弧减半采样
+                pts3d = pts3d[::2] + [pts3d[-1]]
             coords = []
-            for px, py, pz in self._disp3d[i]:
+            for px, py, pz in pts3d:
                 tx = 2 * (y * pz - z * py)
                 ty = 2 * (z * px - x * pz)
                 tz = 2 * (x * py - y * px)
@@ -2269,15 +2710,20 @@ class NCViewer(tk.Tk):
                 coords.append(-vy * scale + oy)
             if not coords:
                 continue
-            if self._trace_items and self._trace_items[-1][0] == color:
-                item, flat = self._trace_items[-1][1], self._trace_items[-1][2]
+            if (self._trace_items and self._trace_items[-1][0] == color
+                    and self._trace_items[-1][2][-2:] == coords[:2]):
+                # 同色且连续(共享端点)才合并; 段过滤间隙处另起新线 (防幻影连接线)
+                flat = self._trace_items[-1][2]
                 flat.extend(coords[2:])          # 跳过与上条共用的衔接点
-                self.canvas.coords(item, *flat)
+                dirty.add(len(self._trace_items) - 1)
             else:
                 item = self.canvas.create_line(coords, fill=color, width=1,
                                                joinstyle="round", capstyle="round",
                                                tags="path")
                 self._trace_items.append([color, item, list(coords)])
+        for idx in dirty:
+            self.canvas.coords(self._trace_items[idx][1],
+                               *self._trace_items[idx][2])
         self._trace_drawn = max(self._trace_drawn, k + 1)
 
 

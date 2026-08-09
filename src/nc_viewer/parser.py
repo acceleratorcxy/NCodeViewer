@@ -98,8 +98,11 @@ def compute_lift_plane(moves) -> float:
 
 
 def compute_segments(moves, lift=None):
-    """把移动序列分段: 从抬刀平面下降 -> 段开始, 回到抬刀平面 -> 段结束。
+    """把移动序列分段: 抬刀平面上的定位移动 -> 下降 -> 加工 -> 回升到抬刀平面。
 
+    段从抬刀平面上的定位移动(下落前)开始, 到回升至抬刀平面结束; 段间
+    连续划分 (上段结束后的移动归入下段)。容差取小 (NC 的 Z 为十进制干净值,
+    抬刀检测按 0.1 取整), 避免把接近平面的中途移动误判为到平面。
     lift 为 None 时用 compute_lift_plane 自动检测; 传入则用用户覆盖值。
     全部移动在平面下方 -> 1 段; 无移动 -> 空列表。
     """
@@ -108,23 +111,25 @@ def compute_segments(moves, lift=None):
     if lift is None:
         lift = compute_lift_plane(moves)
     zs = [m.end[2] for m in moves]
-    tol = max(0.5, (max(zs) - min(zs)) * 0.01)
+    tol = max(0.05, (max(zs) - min(zs)) * 0.0001)
     segs = []
+    pending = 0         # 下一段候选起点 (上段结束后的移动归入下段)
     start = None
     z_min = None
     for i, m in enumerate(moves):
         at_lift = m.end[2] >= lift - tol
         if start is None:
             if not at_lift:
-                start = i
+                start = pending       # 从下落前(抬刀平面上的定位移动)开始
                 z_min = m.end[2]
         else:
             if m.end[2] < z_min:
                 z_min = m.end[2]
-            if at_lift:
+            if at_lift:               # 回升到抬刀平面才算段结束
                 segs.append(Segment(start, i, moves[start].line_number,
                                     m.line_number, z_min))
                 start = None
+                pending = i + 1
     if start is not None:
         segs.append(Segment(start, len(moves) - 1, moves[start].line_number,
                             moves[-1].line_number, z_min))

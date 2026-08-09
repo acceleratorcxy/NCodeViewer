@@ -337,24 +337,24 @@ def test_lift_plane_falls_back_to_max_when_all_unique():
 
 
 def test_segments_plunge_and_retract_cycles():
-    """段 = 下降进入 + 回到抬刀平面"""
-    text = ("G01X0Y0Z100F1000\n"      # 抬刀
+    """段 = 抬刀平面上的定位移动(下落前) -> 下降 -> 加工 -> 回升到抬刀平面"""
+    text = ("G01X0Y0Z100F1000\n"      # 抬刀平面定位 (下落前一行)
             "G01X10Z50F1000\n"        # 下降
             "G01X20Z-2F1000\n"
             "G01X30Z-2F1000\n"
             "G01X40Z100F1000\n"       # 回升 -> 段 1 结束
-            "G01X50Z50F1000\n"        # 段 2 开始
+            "G01X50Z50F1000\n"        # 段 2 开始 (上段结束后的移动归入下段)
             "G01X60Z-5F1000\n"
             "G01X70Z100F1000\n")      # 段 2 结束
     r = parse_nc(text)
     segs = compute_segments(r.moves)
     assert len(segs) == 2
     s1, s2 = segs
-    assert (s1.start_idx, s1.end_idx) == (1, 4)
+    assert (s1.start_idx, s1.end_idx) == (0, 4)
     assert s1.z_min == -2.0
     assert (s2.start_idx, s2.end_idx) == (5, 7)
     assert s2.z_min == -5.0
-    assert s1.start_line == 2 and s1.end_line == 5
+    assert s1.start_line == 1 and s1.end_line == 5
 
 
 def test_segments_lift_override():
@@ -366,17 +366,17 @@ def test_segments_lift_override():
             "G01X40Z100F1000\n")
     r = parse_nc(text)
     segs = compute_segments(r.moves, lift=50.0)
-    # 抬刀 50: 第2行(50)在平面, 第3行(-2)下降, 第4行回 50 -> 1 段
+    # 抬刀 50: 前两行(100/50)在平面上(下落前定位), 第3行(-2)下降, 第4行回 50 -> 1 段
     assert len(segs) == 1
-    assert (segs[0].start_idx, segs[0].end_idx) == (2, 3)
+    assert (segs[0].start_idx, segs[0].end_idx) == (0, 3)
 
 
 def test_segments_all_below_lift_is_one_segment():
-    # 首行 Z10 恰在抬刀平面(唯一 Z, 回退最大值)上, 段从下降行开始
+    # 首行 Z10 恰在抬刀平面(唯一 Z, 回退最大值)上, 段从该行(下落前)开始
     r = parse_nc("G01X0Y0Z10F1000\nG01X10Z-2F1000\n")
     segs = compute_segments(r.moves)
     assert len(segs) == 1
-    assert (segs[0].start_idx, segs[0].end_idx) == (1, 1)
+    assert (segs[0].start_idx, segs[0].end_idx) == (0, 1)
 
 
 def test_segments_empty_program():
