@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nc-viewer-embed"
+version = "1.1.0"
+description = "NC 代码刀路可视化查看器 (Tk 界面 + Qt 离屏 OpenGL 渲染实验版)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["PyQt5>=5.15,<5.16", "numpy>=1.19", "Pillow>=8.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0,<9"]
+
+[project.scripts]
+nc-viewer = "nc_viewer.viewer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
