@@ -52,7 +52,7 @@ python -m pip install pytest
 python -m nc_viewer
 
 # 方式二：带文件启动
-python -m nc_viewer "样例文件\数控程序\HASS\D0354F31311-201_AG6D311A0101.MPF"
+python -m nc_viewer "样例文件\数控程序\...\xxx.MPF"
 
 # 方式三：安装后使用命令行脚本
 nc-viewer
