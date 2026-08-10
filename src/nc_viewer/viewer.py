@@ -52,6 +52,34 @@ def _sample_dir():
     return os.path.expanduser("~")
 
 
+# 刀具 3D 模型固定光源 (世界空间, 右上偏上, 归一化)
+_TOOL_LIGHT = (0.4 / math.hypot(0.4, 0.3, 0.8),
+               0.3 / math.hypot(0.4, 0.3, 0.8),
+               0.8 / math.hypot(0.4, 0.3, 0.8))
+
+
+def _icon_path():
+    """定位窗口图标文件: 打包后为资源目录 (_MEIPASS), 开发时为项目 assets"""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "NCodeViewer_icon.ico")
+    root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "assets", "NCodeViewer_icon.ico")
+
+
+def _set_icon(win):
+    """设置窗口标题栏图标 (主窗口/各级二级窗口, 全局生效); 成功返回 True。
+
+    注: Windows 上 Tk 以图标句柄存储, iconbitmap() 查询返回空, 以
+    设置是否抛异常判定成功 (资源缺失时 TclError)。
+    """
+    try:
+        win.iconbitmap(_icon_path())
+        return True
+    except tk.TclError:
+        return False
+
+
 def _compute_lead_skip(moves):
     """前导跳过数: 连续从原点(0,0,0)出发的起始进给段数量。
 
@@ -148,6 +176,7 @@ class NCViewer(tk.Tk):
     def __init__(self):
         _enable_dpi_awareness()
         super().__init__()
+        _set_icon(self)                    # 窗口标题栏图标 (各级窗口生效)
         theme.apply_theme(self)
         self.configure(bg=theme.BG)
         self.title("NC 刀路查看器")
@@ -216,6 +245,8 @@ class NCViewer(tk.Tk):
         # 渲染图元复用: 结构(折线颜色/点数序列)不变时仅 coords 更新, 免 delete/create
         self._path_items = []
         self._poly_struct = None
+        # 渲染预计算元数据 (visible/colors/merge_prev, 见 _build_render_meta)
+        self._render_meta = None
         self._refresh_job = None         # 旋转/滚转刷新合并任务
         self._rot_moved = False
         # 文件加载进度: 超过延时的加载才在顶部栏显示 (快任务防闪烁)
@@ -248,7 +279,7 @@ class NCViewer(tk.Tk):
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
         # 开关用 _view_refresh: 播放/演示中切换不退出轨迹模式
         ttk.Checkbutton(top, text="显示G0快移", variable=self.show_g0,
-                        command=self._view_refresh).pack(side="left")
+                        command=self._on_show_g0_toggle).pack(side="left")
         self.tool_chk = ttk.Checkbutton(top, text="显示刀具", variable=self.show_tool,
                                         command=self._view_refresh)
         self.tool_chk.pack(side="left", padx=(8, 0))
@@ -1048,6 +1079,7 @@ class NCViewer(tk.Tk):
         self._seg_checked = set()
         self._time_prefix = None
         self._time_pos = {}
+        self._render_meta = None       # 无刀路: 元数据清空
         self._stop_playback()
         self._trace_active = False
         self.file_lbl.config(text="(未打开文件)")
@@ -1130,6 +1162,7 @@ class NCViewer(tk.Tk):
         self._disp3d = item["disp3d"]
         self._move_index = item["move_index"]
         self._lead_skip = item["lead_skip"]
+        self._build_render_meta()      # 渲染预计算元数据 (可见性/颜色/合并链)
         self._parsed_tool = item["tool"]
         self.tool = self.custom_tool if self.custom_tool is not None else self._parsed_tool
         self._current_path = path
@@ -1339,6 +1372,7 @@ class NCViewer(tk.Tk):
             return
         st = compute_stats(self.result)
         win = tk.Toplevel(self)
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.title(f"程序详情 — {os.path.basename(self._current_path)}")
         win.configure(bg=theme.BG)
         win.geometry("560x520")
@@ -1402,6 +1436,7 @@ class NCViewer(tk.Tk):
             messagebox.showinfo("F 曲线", "程序中没有切削移动 (G0 快移无 F)")
             return
         win = tk.Toplevel(self)
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.title(f"F 进给趋势 — {os.path.basename(self._current_path)}")
         win.configure(bg=theme.BG)
         win.geometry("860x480")
@@ -1690,31 +1725,41 @@ class NCViewer(tk.Tk):
 
     # ------------- 刀具 3D 模型 -------------
     def _tool_model_points(self, tool):
-        """刀具旋转体 3D 模型点集 [(kind, [(x,y,z),...])], 本地坐标:
-        刀尖在原点, 刀具轴沿 +Z 向上; body 为半透明实体外轮廓"""
+        """刀具旋转体 3D 模型点集 [(kind, [(x,y,z),...], nx, ny)], 本地坐标:
+        刀尖在原点, 刀具轴沿 +Z 向上。
+
+        band: 侧壁明暗条带 (n_band 段覆盖全圆周, 法向 (nx,ny,0)——绘制层
+        按法向·固定光源定灰阶 + 背面剔除 + 同色描边 → **覆盖整个投影区域
+        的圆柱渐变立体**); top: 顶面圆盘 (受光亮); bottom: 底部圆盘 (仅
+        平底刀, 背光暗, 底部闭合); outline: 外轮廓描边 (不填充);
+        tip: 刀尖标记。无经线/截面圆/轴等外框线。
+        """
         full = tool_full_profile(tool)       # 切削部分 + 刀柄 (反锥含缩颈)
-        l = float(tool.p("l", 30.0))
         h = tool_overall_height(tool)
         r_top = full[-1][0]
-        max_r = max(r for r, _ in full)
+        n_band = 128                 # 条带密度: 相邻色差 ~3/255, 渐变绝对无分段
         pts = []
-        # 实体: 右缘(下->上) + 顶部圆 + 左缘(上->下), 闭合于刀尖
+        # 侧壁条带: 两条经线间的轮廓面 (覆盖全圆周, 上下闭合)
+        for k in range(n_band):
+            t0 = 2 * math.pi * k / n_band
+            t1 = 2 * math.pi * (k + 1) / n_band
+            tm = (t0 + t1) / 2
+            band = ([(r * math.cos(t0), r * math.sin(t0), y) for r, y in full]
+                    + [(r * math.cos(t1), r * math.sin(t1), y)
+                       for r, y in reversed(full)])
+            pts.append(("band", band, math.cos(tm), math.sin(tm)))
+        # 顶面圆盘 (斜视角呈椭圆, 法向 +Z 恒受光)
         top_circle = [(r_top * math.cos(t), r_top * math.sin(t), h)
                       for t in (i * math.tau / 24 for i in range(24))]
-        body = ([(r, 0.0, y) for r, y in full] + top_circle
-                + [(-r, 0.0, y) for r, y in reversed(full)])
-        pts.append(("body", body))
-        # 两条经线 (60°/120°) 作表面细节
-        for ang in (math.pi / 3, 2 * math.pi / 3):
-            pts.append(("mer", [(r * math.cos(ang), r * math.sin(ang), y)
-                                for r, y in full]))
-        # 关键截面圆 (最大半径处)
-        for y in sorted({y for r, y in full if abs(r - max_r) < 1e-9}):
-            circle = [(max_r * math.cos(t), max_r * math.sin(t), y)
-                      for t in (i * math.tau / 24 for i in range(24))]
-            pts.append(("cir", circle))
-        pts.append(("axis", [(0.0, 0.0, 0.0), (0.0, 0.0, h)]))
-        pts.append(("tip", [(0.0, 0.0, 0.0)]))
+        pts.append(("top", top_circle, 0.0, 0.0))
+        # 底部圆盘 (仅平底刀: 底部为平面; 尖底/圆角底无平面不画)
+        bottom_r = max((r for r, y in full if y <= 1e-9), default=0.0)
+        if bottom_r > 0.01:
+            pts.append(("bottom", [(bottom_r * math.cos(t),
+                                    bottom_r * math.sin(t), 0.0)
+                                   for t in (i * math.tau / 24
+                                             for i in range(24))], 0.0, 0.0))
+        pts.append(("tip", [(0.0, 0.0, 0.0)], 0.0, 0.0))
         return pts
 
     def _draw_tool_model(self):
@@ -1731,35 +1776,51 @@ class NCViewer(tk.Tk):
         factor = 1.0
         if 0 < px_w < 24:
             factor = min(24.0 / px_w, 6.0)
-        for kind, pts in self._tool_model_points(tool):
-            screen = []
+        # 观察方向 (正交投影视线) 与固定光源 (世界空间)
+        q = self.quat
+        vx, vy, vz = quat_rotate((0.0, 0.0, 1.0), q)
+        lx, ly, lz = _TOOL_LIGHT
+        model = []
+        for kind, pts, nx, ny in self._tool_model_points(tool):
+            screen = []                  # 扁平坐标 [x0,y0,x1,y1,...]
             for x, y, z in pts:
                 wx = pos[0] + x * factor
                 wy = pos[1] + y * factor
                 wz = pos[2] + z * factor
-                a, b = project((wx, wy, wz), self.quat)
-                screen.append(self.world_to_canvas(a, b))
+                a, b = project((wx, wy, wz), q)
+                sx, sy = self.world_to_canvas(a, b)
+                screen.append(sx)
+                screen.append(sy)
+            model.append((kind, screen, nx, ny))
+        for kind, screen, nx, ny in model:
             if kind == "tip":
-                x0, y0 = screen[0]
+                x0, y0 = screen[0], screen[1]
                 self.canvas.create_oval(x0 - 4, y0 - 4, x0 + 4, y0 + 4,
                                         fill=CUR_COLOR, outline="#000000",
                                         tags="toolmodel")
-            elif kind == "body":
-                # 实体 (凝实): 深灰实心填充 + 亮轮廓, 不再半透明飘浮
-                self.canvas.create_polygon(screen, fill="#63636b",
-                                           outline="#d4d4dc", width=2,
-                                           tags="toolmodel")
-            elif kind == "cir":
-                # 关键截面: 投影为椭圆, 浅色高光填充增强立体 (深色会像挖空)
-                self.canvas.create_polygon(screen, fill="#9a9aa2",
-                                           outline="#c8c8d0", width=1,
-                                           tags="toolmodel")
-            elif len(screen) >= 2:
-                kw = {"fill": "#8a8a8a", "tags": "toolmodel"}
-                if kind == "axis":
-                    kw["fill"] = "#6e6e6e"
-                    kw["dash"] = (3, 3)
-                self.canvas.create_line(screen, width=1, **kw)
+            elif kind == "top":
+                # 顶面圆盘: 受光亮面, 斜视角呈椭圆 (法向 +Z 恒受光)
+                lum = max(0.0, min(1.0, lz))
+                v = int(45 + 150 * lum)
+                self.canvas.create_polygon(screen, fill="#%02x%02x%02x"
+                                           % (v, v, v + 6),
+                                           outline="", tags="toolmodel")
+            elif kind == "bottom":
+                # 底部圆盘: 背光暗面, 平底刀底部闭合不镂空
+                self.canvas.create_polygon(screen, fill="#2d2d33",
+                                           outline="", tags="toolmodel")
+            else:
+                # 面法向旋转到世界空间; 背面剔除 + 法向·光源定灰阶
+                nxw, nyw, nzw = quat_rotate((nx, ny, 0.0), q)
+                if nxw * vx + nyw * vy + nzw * vz < 0:
+                    continue               # 背面 (正交投影无遮挡, 主动剔除)
+                lum = max(0.0, min(1.0, nxw * lx + nyw * ly + nzw * lz))
+                v = int(45 + 150 * lum)    # 灰阶: 暗 #2d.. 亮 #c3.. (金属对比)
+                fill = "#%02x%02x%02x" % (v, v, v + 6)
+                # 描边同填充色: 相邻条带共享边被同色覆盖, 无背景细缝
+                # (Tk 多边形无抗锯齿, 异色边会透出半透明缝)
+                self.canvas.create_polygon(screen, fill=fill, outline=fill,
+                                           width=1, tags="toolmodel")
 
     # ------------- 刀具剖面图 -------------
     def show_tool_profile(self):
@@ -1768,6 +1829,7 @@ class NCViewer(tk.Tk):
             return
         tool = self.tool
         win = tk.Toplevel(self)
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.title(f"刀具剖面图 — {tool_summary(tool)}")
         win.configure(bg=theme.BG)
         win.geometry("480x520")
@@ -1884,6 +1946,7 @@ class NCViewer(tk.Tk):
     def show_tool_setup(self):
         """自定义窗口: 选择类型 -> 对应规格输入框 -> 应用/恢复自动解析"""
         win = tk.Toplevel(self)
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.title("刀具自定义")
         win.configure(bg=theme.BG)
         win.geometry("380x340")
@@ -1966,6 +2029,51 @@ class NCViewer(tk.Tk):
         return wx, wy
 
     # ------------- 渲染 -------------
+    # ------------- 渲染预计算元数据 (性能优化: 热循环零字典/属性访问) -------------
+    def _build_render_meta(self):
+        """构建渲染预计算元数据 (visible/colors/merge_prev)。
+
+        加载/段过滤/G0 开关/lead 变化时重建 (低频, 毫秒级), 热循环
+        (render/_trace_draw_to) 每移动一次索引查表:
+          visible[i]    : 移动是否参与渲染 (前导跳过/段过滤/隐藏 G0)
+          colors[i]     : 预解析颜色串 (G0 灰 / 调色板)
+          merge_prev[i] : 与上一个可见移动同色且共享端点 (折线合并,
+                          渲染时跳过共享端点重投影)
+        """
+        self._render_meta = None
+        if not self.result:
+            return
+        moves = self.result.moves
+        n = len(moves)
+        visible = [False] * n
+        colors = [None] * n
+        merge_prev = [False] * n
+        show_g0 = self.show_g0.get()
+        palette = self.palette
+        lead = self._lead_skip
+        prev_color = None
+        prev_i = None
+        for i in range(lead, n):
+            m = moves[i]
+            if m.motion == "G0" and not show_g0:
+                continue
+            if self._move_filtered(i):
+                continue
+            c = G0_COLOR if m.motion == "G0" else palette.get(m.feed, "#ffffff")
+            visible[i] = True
+            colors[i] = c
+            if (prev_i is not None and c == prev_color
+                    and moves[prev_i].end == m.start):
+                merge_prev[i] = True
+            prev_i = i
+            prev_color = c
+        self._render_meta = (visible, colors, merge_prev)
+
+    def _on_show_g0_toggle(self):
+        """显示 G0 开关: 可见性变化影响合并链, 重建元数据后刷新"""
+        self._build_render_meta()
+        self._view_refresh()
+
     def rotated_bbox(self):
         """当前旋转视角下, 所有刀路点投影后的 2D 包围盒 (a0,b0,a1,b1)。
 
@@ -2057,10 +2165,12 @@ class NCViewer(tk.Tk):
                         flat[i + 1] = my + (flat[i + 1] - my) * factor
             self._place_legend()
             # 屏幕像素尺寸的标记类图元不随缩放变化: 重绘
-            # (方向箭头固定 14px / 当前点 6px / 十字虚线铺满可视区)
-            self.canvas.delete("cur", "curseg", "toolmodel")
+            # (方向箭头固定 14px / 当前点 6px / 十字虚线铺满可视区 /
+            #  坐标系与左下角指示器固定像素)
+            self.canvas.delete("cur", "curseg", "toolmodel", "axes", "axescorner")
             self._draw_current()
             self._draw_tool_model()
+            self._draw_axes()
 
     def render(self):
         self._trace_active = False        # 全量渲染即退出轨迹演示
@@ -2088,7 +2198,7 @@ class NCViewer(tk.Tk):
                     coords[i + 1] = -base[i + 1] * scale + oy
                 polylines.append([color, coords])
         else:
-            # 内联四元数投影 + 相邻同色且连续的移动合并为折线(扁平坐标列表)
+            # 内联四元数投影 + 预计算元数据驱动 (可见性/颜色/合并查表)
             polylines = []
             base_store = []      # 缓存: 不含缩放偏移的世界投影坐标
             moves = self.result.moves
@@ -2096,43 +2206,57 @@ class NCViewer(tk.Tk):
             n_moves = len(moves)
             seg_filter = self._seg_filter
             lead = self._lead_skip
-            # 快路径: 无段过滤/全勾选时省去每次 _move_filtered 调用 (25k 次)
+            meta = self._render_meta
+            if meta is None:             # 防御: 未初始化时现算
+                self._build_render_meta()
+                meta = self._render_meta
             if seg_filter is not None and not seg_filter:
-                base_store = []              # 空过滤: 无刀路可画
+                base_store = []          # 空过滤: 无刀路可画
             else:
-                check_seg = (seg_filter is not None)
+                vis, cols, merg = meta
+                drag = (self._rot_data is not None)   # 拖动: 不写 base 缓存
                 for i in range(lead, n_moves):
-                    m = moves[i]
-                    if m.motion == "G0" and not show_g0:
+                    if not vis[i]:
                         continue
-                    if check_seg:
-                        if not any(lo <= i <= hi for lo, hi in seg_filter):
-                            continue
+                    color = cols[i]
                     pts3d = disp3d[i]
-                    color = color_of_move(m, palette)
-                    coords = []
-                    base = []
-                    ap = coords.append
-                    bp = base.append
-                    for px, py, pz in pts3d:
-                        tx = a2 * pz - b2 * py
-                        ty = b2 * px - c2 * pz
-                        tz = c2 * py - a2 * px
-                        vx = px + w * tx + y * tz - z * ty
-                        vy = py + w * ty + z * tx - x * tz
-                        ap(vx * scale + ox)
-                        ap(-vy * scale + oy)
-                        bp(vx)
-                        bp(vy)
-                    # 相邻且连续(共享端点)的同色移动才合并折线; 段过滤产生的
-                    # 间隙处必须另起新线, 否则会画出幻影连接线
-                    if (polylines and polylines[-1][0] == color
-                            and polylines[-1][1][-2:] == coords[:2]):
-                        polylines[-1][1].extend(coords[2:])
-                        base_store[-1][1].extend(base[2:])
+                    n = len(pts3d)
+                    if merg[i] and polylines:
+                        # 合并: 共享端点已在折线尾部, 跳过首点重投影
+                        poly = polylines[-1][1]
+                        base = base_store[-1][1] if not drag else None
+                        start = 1
                     else:
-                        polylines.append([color, coords])
-                        base_store.append([color, base])
+                        poly = []
+                        polylines.append([color, poly])
+                        base = [] if not drag else None
+                        if not drag:
+                            base_store.append([color, base])
+                        start = 0
+                    ap = poly.append
+                    if drag:
+                        for i2 in range(start, n):
+                            px, py, pz = pts3d[i2]
+                            tx = a2 * pz - b2 * py
+                            ty = b2 * px - c2 * pz
+                            tz = c2 * py - a2 * px
+                            vx = px + w * tx + y * tz - z * ty
+                            vy = py + w * ty + z * tx - x * tz
+                            ap(vx * scale + ox)
+                            ap(-vy * scale + oy)
+                    else:
+                        bp = base.append
+                        for i2 in range(start, n):
+                            px, py, pz = pts3d[i2]
+                            tx = a2 * pz - b2 * py
+                            ty = b2 * px - c2 * pz
+                            tz = c2 * py - a2 * px
+                            vx = px + w * tx + y * tz - z * ty
+                            vy = py + w * ty + z * tx - x * tz
+                            ap(vx * scale + ox)
+                            ap(-vy * scale + oy)
+                            bp(vx)
+                            bp(vy)
             # 旋转拖动中 quat 每帧变化, 缓存命中不了, 不写 (省 25k 条坐标拷贝)
             if self._rot_data is None:
                 self._proj_cache = (key, base_store)
@@ -2157,11 +2281,11 @@ class NCViewer(tk.Tk):
 
         # 标记类图元数量小, 删除重建; 旋转拖动中跳过 (每帧重建 ~15ms,
         # 刀路保持完整, 标记在释放后的最终帧恢复)
-        self.canvas.delete("axes", "cur", "curseg", "toolmodel")
+        self.canvas.delete("axes", "axescorner", "cur", "curseg", "toolmodel")
         if self._rot_data is None:
-            self._draw_axes()
             self._draw_current()
             self._draw_tool_model()
+            self._draw_axes()          # 最后画: 不被十字线/当前行高亮/刀具覆盖
             self.status.config(text=self._status_text())
         # 图例窗口项只在画布尺寸变化时重贴 (_on_canvas_configure),
         # 每次重建 ~12ms 是拖动帧率杀手
@@ -2177,19 +2301,44 @@ class NCViewer(tk.Tk):
             pass
 
     def _draw_axes(self):
-        """画出当前视角下 X(红)/Y(绿)/Z(青) 轴方向指示"""
+        """原点 (0,0,0) 大坐标系 (60px) + 画布左下角小指示器 (34px)。
+
+        原点坐标系 (axes): 三轴 + 轴端箭头 + 加粗标签 + 原点白圈, 锚定
+        世界原点, 随平移/旋转/缩放变化; 左下角指示器 (axescorner): 三轴 +
+        箭头 + 标签, 锚定画布左下角, 只随旋转变化 (模型适配后原点常贴
+        画布边缘/出画布, 作保底方向参照)。尺寸固定像素 (60 > 34)。
+        """
         q = self.quat
+        axes = (("X", "#ff5555", (1, 0, 0)),
+                ("Y", "#55ff55", (0, 1, 0)),
+                ("Z", "#55ffff", (0, 0, 1)))
+        # 原点坐标系: 世界原点投影 + 旋转后单位方向像素偏移
         ox, oy = self.world_to_canvas(*project((0, 0, 0), q))
-        r = max(self.scale * 8, 30)
-        for axis, color, vec in (("X", "#ff5555", (1, 0, 0)),
-                                 ("Y", "#55ff55", (0, 1, 0)),
-                                 ("Z", "#55ffff", (0, 0, 1))):
-            ex, ey = self.world_to_canvas(*project((vec[0] * r, vec[1] * r, vec[2] * r), q))
-            self.canvas.create_line(ox, oy, ex, ey, fill=color, width=2, tags="axes")
-            self.canvas.create_text(ex, ey, text=axis, fill=color, tags="axes")
-        # 原点标记
-        self.canvas.create_oval(ox - 4, oy - 4, ox + 4, oy + 4,
+        for axis, color, vec in axes:
+            a, b = project(vec, q)                  # 旋转后单位方向
+            ex, ey = ox + a * 90, oy - b * 90
+            self.canvas.create_line(ox, oy, ex, ey, fill=color, width=2,
+                                    tags="axes")
+            self._arrow_at(ex, ey, a * 48, b * 48, color=color, size=12,
+                           tags="axes")
+            self.canvas.create_text(ex + a * 18, ey - b * 18, text=axis,
+                                    fill=color, font=("", 11, "bold"),
+                                    tags="axes")
+        self.canvas.create_oval(ox - 5, oy - 5, ox + 5, oy + 5,
                                 outline="#ffffff", width=1, tags="axes")
+        # 左下角指示器: 固定画布左下角, 只随旋转变化 (不随平移/缩放)
+        ch = self.canvas.winfo_height()
+        cx, cy = 62, ch - 56
+        for axis, color, vec in axes:
+            a, b = project(vec, q)
+            ex, ey = cx + a * 34, cy - b * 34
+            self.canvas.create_line(cx, cy, ex, ey, fill=color, width=2,
+                                    tags="axescorner")
+            self._arrow_at(ex, ey, a * 26, b * 26, color=color, size=9,
+                           tags="axescorner")
+            self.canvas.create_text(ex + a * 13, ey - b * 13, text=axis,
+                                    fill=color, font=("", 10, "bold"),
+                                    tags="axescorner")
 
     def _draw_current(self):
         if self.current_line is None:
@@ -2261,20 +2410,27 @@ class NCViewer(tk.Tk):
                 nx, ny = pts[-1]
             self._arrow_at(x, y, nx - x, ny - y)
 
-    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=14):
-        """在 (x,y) 处画一个指向 (dx,dy) 方向的实心三角箭头 (带深色描边, 醒目)"""
+    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=28, tags="cur"):
+        """在 (x,y) 处画一个指向 (dx,dy) 方向的镖形箭头。
+
+        镖形 (尖端 + 双翼 + 尾部内凹) 比纯三角箭头更饱满精致,
+        深色描边保证任何背景下醒目; 默认尺寸 28px (刀路方向醒目)。
+        """
         L = math.hypot(dx, dy)
         if L < 1e-6:
             return
         ux, uy = dx / L, dy / L
         px, py = -uy, ux                     # 垂直方向(箭头翼)
         size = min(size, L * 0.5)            # 避免过短段上箭头过大
-        b1x = x - ux * size + px * size * 0.55
-        b1y = y - uy * size + py * size * 0.55
-        b2x = x - ux * size - px * size * 0.55
-        b2y = y - uy * size - py * size * 0.55
-        self.canvas.create_polygon(x, y, b1x, b1y, b2x, b2y,
-                                   fill=color, outline="#000000", width=1, tags="cur")
+        half = size * 0.62                   # 翼展
+        tail = size * 1.0                    # 尾长
+        notch = size * 0.32                  # 尾部内凹深度
+        self.canvas.create_polygon(
+            x, y,                            # 尖端
+            x - ux * tail + px * half, y - uy * tail + py * half,
+            x - ux * (tail - notch), y - uy * (tail - notch),
+            x - ux * tail - px * half, y - uy * tail - py * half,
+            fill=color, outline="#000000", width=1.5, tags=tags)
 
     # ------------- 交互: 平移/缩放 + 点击拾取 -------------
     PICK_MAX_PX = 12.0        # 拾取/旋转吸附模型点的最大像素距离
@@ -2296,6 +2452,8 @@ class NCViewer(tk.Tk):
         self.canvas.move("all", dx, dy)
         # 漂浮图例窗口项补偿: 保持画布右上角固定
         self.canvas.move("legend", -dx, -dy)
+        # 左下角指示器锚定画布: 反向补偿 (图例同模式)
+        self.canvas.move("axescorner", -dx, -dy)
         if self._trace_active:
             # 轨迹存储坐标同步位移, 否则后续追加新点会混用新旧坐标系导致错乱
             for _, _, flat in self._trace_items:
@@ -2837,6 +2995,7 @@ class NCViewer(tk.Tk):
         else:
             self._seg_filter = None
         self._build_time_prefix()      # 段过滤变化后重建播放进度时间轴
+        self._build_render_meta()      # 过滤变化: 可见性/合并链重建
         if self.result:
             self._fill_stats()            # 段模式: 统计随勾选段刷新
             if refresh:
@@ -3092,6 +3251,7 @@ class NCViewer(tk.Tk):
         self._trace_drawn = self._trace_base()
         self._trace_items = []
         self._move_lines = [m.line_number for m in self.result.moves]
+        self.canvas.delete("axes", "axescorner")   # 清旧坐标系再画, 防图元重复
         self._draw_axes()
 
     def _trace_draw_to_line(self, ln):
@@ -3102,7 +3262,8 @@ class NCViewer(tk.Tk):
     def _trace_redraw(self):
         """用当前四元数/缩放/偏移重绘已画轨迹 (旋转/缩放/适配时不退出轨迹模式)"""
         drawn = self._trace_drawn
-        self.canvas.delete("axes", "path", "cur", "curseg", "toolmodel")
+        self.canvas.delete("axes", "axescorner", "path", "cur", "curseg",
+                           "toolmodel")
         self._path_items = []             # 渲染图元复用结构失效
         self._poly_struct = None
         self._draw_axes()
@@ -3124,41 +3285,46 @@ class NCViewer(tk.Tk):
                 self.canvas.delete(item)
             self._trace_items = []
             self._trace_drawn = self._trace_base()
-        moves = self.result.moves
-        show_g0 = self.show_g0.get()
         w, x, y, z = self.quat
         scale, ox, oy = self.scale, self.offset[0], self.offset[1]
+        vis, cols, merg = self._render_meta
         dirty = set()
         for i in range(self._trace_drawn, k + 1):
-            m = moves[i]
-            if self._move_filtered(i):
+            if not vis[i]:
                 continue
-            if m.motion == "G0" and not show_g0:
-                continue
-            color = color_of_move(m, self.palette)
+            color = cols[i]
             pts3d = self._disp3d[i]
-            coords = []
-            for px, py, pz in pts3d:
-                tx = 2 * (y * pz - z * py)
-                ty = 2 * (z * px - x * pz)
-                tz = 2 * (x * py - y * px)
-                vx = px + w * tx + (y * tz - z * ty)
-                vy = py + w * ty + (z * tx - x * tz)
-                coords.append(vx * scale + ox)
-                coords.append(-vy * scale + oy)
-            if not coords:
-                continue
-            if (self._trace_items and self._trace_items[-1][0] == color
-                    and self._trace_items[-1][2][-2:] == coords[:2]):
-                # 同色且连续(共享端点)才合并; 段过滤间隙处另起新线 (防幻影连接线)
+            n = len(pts3d)
+            if merg[i] and self._trace_items \
+                    and self._trace_items[-1][0] == color:
+                # 合并: 共享点已在折线尾部, 跳过首点 (防幻影连接线)
                 flat = self._trace_items[-1][2]
-                flat.extend(coords[2:])          # 跳过与上条共用的衔接点
+                for i2 in range(1, n):
+                    px, py, pz = pts3d[i2]
+                    tx = 2 * (y * pz - z * py)
+                    ty = 2 * (z * px - x * pz)
+                    tz = 2 * (x * py - y * px)
+                    vx = px + w * tx + (y * tz - z * ty)
+                    vy = py + w * ty + (z * tx - x * tz)
+                    flat.append(vx * scale + ox)
+                    flat.append(-vy * scale + oy)
                 dirty.add(len(self._trace_items) - 1)
             else:
+                coords = []
+                ap = coords.append
+                for i2 in range(n):
+                    px, py, pz = pts3d[i2]
+                    tx = 2 * (y * pz - z * py)
+                    ty = 2 * (z * px - x * pz)
+                    tz = 2 * (x * py - y * px)
+                    vx = px + w * tx + (y * tz - z * ty)
+                    vy = py + w * ty + (z * tx - x * tz)
+                    ap(vx * scale + ox)
+                    ap(-vy * scale + oy)
                 item = self.canvas.create_line(coords, fill=color, width=1,
                                                joinstyle="round", capstyle="round",
                                                tags="path")
-                self._trace_items.append([color, item, list(coords)])
+                self._trace_items.append([color, item, coords])
         for idx in dirty:
             self.canvas.coords(self._trace_items[idx][1],
                                *self._trace_items[idx][2])

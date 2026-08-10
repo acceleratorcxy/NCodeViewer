@@ -16,6 +16,11 @@ REM        conda 环境构建时自动把 UCRT DLL 打包进 EXE,
 REM        使裸装 Win7 (无 KB2999226 补丁) 也能运行;
 REM        样例文件仅本地测试用, 不打包进 EXE。
 REM
+REM  字节码加密: PyInstaller --key (AES 加密 .pyc, 防解包直读);
+REM        密钥 = 环境变量 NCVIEWER_KEY (32 位 hex) 优先,
+REM        否则用下方默认密钥 (入库公开, 建议分发时自行设置私有密钥);
+REM        需 tinyaes 库 (脚本自动安装)。
+REM
 REM  脚本规范: 凡以引号开头的命令行不得以重定向结尾
 REM  (cmd 会剥首尾引号), 重定向一律前置; 命令输出用临时文件传递。
 REM ============================================================
@@ -92,6 +97,28 @@ if not "%PI_VER:~0,1%"=="5" (
 )
 :pi_ok
 
+REM --key 字节码加密依赖 tinyaes (AES 实现), 缺失时自动安装
+>nul 2>nul %PYCMD% -m pip show tinyaes
+if errorlevel 1 (
+    echo        未找到 tinyaes，正在安装 --key 字节码加密依赖 ...
+    %PYCMD% -m pip install tinyaes
+    if errorlevel 1 goto :fail
+)
+
+REM 加密密钥: NCVIEWER_KEY 环境变量覆盖, 否则每次打包重新生成
+REM (EXE 自包含解密, 密钥无需跨版本一致)。密钥随打包产物保存到
+REM dist\.ncviewer_key 与 EXE 放一起, 不入库, 每次打包更新。
+REM 注: 用 goto 链而非 if 括号块, 括号块内 %KEY% 在解析时展开
+REM (尚未赋值) 会导致写入空值。
+if defined NCVIEWER_KEY (
+    set "KEY=%NCVIEWER_KEY%"
+    goto :key_ok
+)
+> "%TEMP%\ncv_key.txt" %PYCMD% -c "import secrets; print(secrets.token_hex(16))"
+for /f "usebackq delims=" %%k in ("%TEMP%\ncv_key.txt") do set "KEY=%%k"
+del /q "%TEMP%\ncv_key.txt" >nul 2>nul
+:key_ok
+
 echo [3/4] 清理旧构建产物 ...
 if exist build rmdir /s /q build
 if exist dist\NCViewer.exe del /q dist\NCViewer.exe
@@ -99,11 +126,14 @@ if exist dist\NCViewer.exe del /q dist\NCViewer.exe
 echo [4/4] 正在打包 EXE (单文件, 不含样例文件, 图标 assets\NCodeViewer_icon.ico)...
 if defined HAS_UCRT (
     echo        检测到 conda 环境，内置 UCRT 运行时，支持裸装 Win7...
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --add-data "assets\NCodeViewer_icon.ico;." --key "%KEY%" --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
 ) else (
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --add-data "assets\NCodeViewer_icon.ico;." --key "%KEY%" --clean launcher.py
 )
 if errorlevel 1 goto :fail
+
+REM 密钥随打包产物保存 (与 EXE 同目录, 不入库; 每次打包更新)
+echo %KEY%>"dist\.ncviewer_key" 2>nul
 
 echo.
 echo 打包完成！产物: %~dp0dist\NCViewer.exe

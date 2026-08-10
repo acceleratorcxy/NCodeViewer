@@ -16,7 +16,7 @@ import pytest
 from nc_viewer import theme
 from nc_viewer.tool import Tool
 from nc_viewer.viewer import NCViewer, _sample_dir
-from nc_viewer.geometry import orbit_rotate, project
+from nc_viewer.geometry import G0_COLOR, orbit_rotate, project
 
 OPEN_TEXT = "打开文件…"
 FILE_LIST_TEXT = "文件列表"
@@ -44,6 +44,26 @@ def app():
     a.withdraw()
     yield a
     a.destroy()
+
+
+def test_window_icon_all_levels(app, tmp_path):
+    """窗口标题栏图标: 主窗口与各级二级窗口均设置 (图标全局生效)
+
+    Windows 上 iconbitmap() 查询返回空 (句柄存储), 以设置无异常判定成功。
+    """
+    from nc_viewer.viewer import _icon_path, _set_icon
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    assert os.path.exists(_icon_path()), "图标资源应存在"
+    assert _set_icon(app), "主窗口图标设置应成功"
+    app.show_details()          # 二级窗口 (详情)
+    wins = [w for w in app.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert wins, "详情窗口应存在"
+    for w in wins:
+        assert _set_icon(w), "二级窗口图标设置应成功"
+    for w in wins:
+        w.destroy()
 
 
 def test_open_file_button_exists_once(app):
@@ -639,10 +659,44 @@ def test_tool_model_solid_body(app, tmp_path):
     app.show_tool.set(True)
     app.set_current_line(1)
     bodies = [i for i in app.canvas.find_withtag("toolmodel")
-              if app.canvas.type(i) == "polygon"]
-    assert bodies, "应有刀具实体多边形"
+              if app.canvas.type(i) == "polygon"
+              and app.canvas.itemcget(i, "fill")]
+    assert bodies, "应有刀具实体条带"
     assert app.canvas.itemcget(bodies[0], "stipple") == "", "实体不应半透明"
-    assert float(app.canvas.itemcget(bodies[0], "width")) >= 1, "轮廓线可见"
+    assert app.canvas.itemcget(bodies[0], "outline") == \
+        app.canvas.itemcget(bodies[0], "fill"), \
+        "条带描边应与填充同色 (渐变无缝, 无背景细缝)"
+
+
+def test_tool_model_faces_no_lines(app, tmp_path):
+    """刀具 3D 模型: 侧壁明暗条带渐变 (覆盖全圆周) + 顶面圆盘 + 外轮廓描边;
+    平底刀含底部圆盘 (底部闭合); 无经线/截面圆/轴等外框线"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nX20Y30\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.tool = Tool("flat", {"d": 10, "r": 0, "l": 30})
+    app.show_tool.set(True)
+    app.set_current_line(1)
+    items = app.canvas.find_withtag("toolmodel")
+    types = [app.canvas.type(i) for i in items]
+    assert types.count("line") == 0, "不应有经线/截面圆/轴外框线"
+    assert types.count("oval") == 1, "刀尖标记"
+    fills = [app.canvas.itemcget(i, "fill")
+             for i in items if app.canvas.type(i) == "polygon"
+             and app.canvas.itemcget(i, "fill")]
+    assert len(set(fills)) >= 4, "侧壁明暗条带应有多个灰阶 (圆柱渐变)"
+    # 无外轮廓线: 所有多边形均有填充 (条带自身构成完整表面)
+    outlines = [i for i in items if app.canvas.type(i) == "polygon"
+                and app.canvas.itemcget(i, "fill") == ""]
+    assert len(outlines) == 0, "不应有外轮廓描边线 (外表皮线框感)"
+    # 球头 (尖底): 无底部圆盘 (多边形少 1)
+    n_flat = types.count("polygon")
+    app.tool = Tool("ball", {"d": 10, "r": 5, "l": 30})
+    app.set_current_line(1)
+    items = app.canvas.find_withtag("toolmodel")
+    assert len(items) > 0, "球头应正常渲染"
+    n_ball = [app.canvas.type(i) for i in items].count("polygon")
+    assert n_ball == n_flat - 1, "球头尖底无底部圆盘"
 
 
 def test_tool_model_no_oversize_when_large(app, tmp_path):
@@ -668,15 +722,15 @@ def test_tool_model_no_oversize_when_large(app, tmp_path):
         w, hh = bb[2] - bb[0], bb[3] - bb[1]
         assert max(w, hh) <= h_max, "大刀具不应放大 (实测 %.0f > %.0f)" % (
             max(w, hh), h_max)
-    # 截面高光: 比实体浅 (非挖空感)
-    body = [i for i in app.canvas.find_withtag("toolmodel")
-            if app.canvas.type(i) == "polygon"][0]
-    body_fill = app.canvas.itemcget(body, "fill")
-    cirs = [i for i in app.canvas.find_withtag("toolmodel")
-            if app.canvas.type(i) == "polygon" and
-            app.canvas.itemcget(i, "fill") != body_fill]
-    for c in cirs:
-        assert app.canvas.itemcget(c, "fill") > body_fill, "截面应为高光 (比实体浅)"
+    # 侧壁明暗条带: 多灰阶渐变 (非挖空/非单色一片)
+    fills = [app.canvas.itemcget(i, "fill")
+             for i in app.canvas.find_withtag("toolmodel")
+             if app.canvas.type(i) == "polygon"
+             and app.canvas.itemcget(i, "fill")]
+    vals = [int(f[1:3], 16) for f in fills]
+    assert len(set(fills)) >= 3, "侧壁明暗条带应有多个灰阶 (暗/中/亮)"
+    assert max(vals) > 130, "应有受光亮面 (顶面/受光条带)"
+    assert min(vals) < 90, "应有暗面 (背光条带)"
     app.quat = (1.0, 0.0, 0.0, 0.0)      # 共享 fixture: 恢复默认视图
 
 
@@ -1237,9 +1291,119 @@ def test_direction_arrows_fixed_size_after_zoom(app, tmp_path):
                 spans.append(max(max(xs) - min(xs), max(ys) - min(ys)))
         return spans
 
-    assert arrow_span() and max(arrow_span()) <= 20      # 固定 14px 级
+    # 镖形箭头 28px 规格: 尾长 28 + 翼展 2*17.4 ≈ 35px 内
+    assert arrow_span() and max(arrow_span()) <= 38
     app.zoom_at(2.0, None)                               # 放大 2 倍
-    assert arrow_span() and max(arrow_span()) <= 20      # 缩放后仍固定尺寸
+    assert arrow_span() and max(arrow_span()) <= 38      # 缩放后仍固定尺寸
+
+
+def test_axes_origin_large_and_corner_small(app, tmp_path):
+    """坐标系: 原点 (0,0,0) 大坐标系 (60px) + 画布左下角小指示器 (34px)。
+
+    原点坐标系三轴/标签/箭头齐全 + 原点白圈; 左下角指示器独立 tag,
+    不随平移移动 (锚定画布); 原点轴长 > 左下角轴长。
+    """
+    from types import SimpleNamespace
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.state("normal")
+    app.geometry("1280x800+100+100")
+    app.update()
+    app.quat = orbit_rotate(app.quat, 30, 20)   # 斜视角: 三轴均有投影方向
+    app.render()
+
+    def _counts(tag):
+        items = app.canvas.find_withtag(tag)
+        return ([app.canvas.coords(i) for i in items if app.canvas.type(i) == "line"],
+                [i for i in items if app.canvas.type(i) == "text"],
+                [i for i in items if app.canvas.type(i) == "polygon"],
+                [i for i in items if app.canvas.type(i) == "oval"])
+
+    lines, texts, polys, ovals = _counts("axes")
+    assert len(lines) == 3 and len(texts) == 3, "原点坐标系应有 3 轴 + 3 标签"
+    assert len(polys) == 3, "原点坐标轴应有 3 个轴端箭头"
+    assert len(ovals) == 1, "原点应有白圈标记"
+    clines, ctexts, cpolys, _ = _counts("axescorner")
+    assert len(clines) == 3 and len(ctexts) == 3, "左下角应有 3 轴 + 3 标签"
+    assert len(cpolys) == 3, "左下角指示器应有 3 个轴端箭头"
+
+    def _lens(coords_list):
+        return [math.hypot(c[2] - c[0], c[3] - c[1]) for c in coords_list]
+
+    ol, cl = _lens(lines), _lens(clines)
+    # 同方向轴逐轴比较: 原点系 90px / 左下角 34px, 任意视角投影比例恒定
+    # (斜视角下 Z 轴有透视缩短, 不能跨轴比较)
+    assert ol[0] > cl[0] and ol[1] > cl[1] and ol[2] > cl[2], \
+        "原点坐标系应比左下角指示器更大 (90px > 34px)"
+    assert max(ol) > 70, "原点坐标系主轴应接近设计长度 90px"
+
+    # 左下角指示器锚定画布: 平移画布后位置不变 (原点坐标系随世界平移)
+    app._pan_start(SimpleNamespace(x=100, y=100))
+    app._pan_move(SimpleNamespace(x=140, y=130))
+    clines2 = [app.canvas.coords(i) for i in
+               app.canvas.find_withtag("axescorner")
+               if app.canvas.type(i) == "line"]
+    assert clines2 == clines, "左下角指示器不应随画布平移"
+
+
+def test_render_meta_merge_and_visibility(app, tmp_path):
+    """渲染预计算元数据: 可见性/颜色/合并标记 (性能优化回归保护)
+
+    合并条件 = 同色 + 共享端点 + 均可见; G0 与切削不同色不合并;
+    隐藏 G0 后重建: G0 移动不可见, 合并链按新可见序列重算。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG01X30Y10\nG01X50Y10\nG00X60Y10\n"
+                 "G01X70Y10F2000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.render()
+    assert app._lead_skip == 1          # 首条从原点出发, 显示跳过
+    visible, colors, merge = app._render_meta
+    assert visible[1] and visible[2] and visible[3] and visible[4]
+    assert colors[1] == colors[2]       # 同 F1000
+    assert colors[3] == G0_COLOR        # G0 灰
+    assert colors[4] != colors[2]       # F2000 不同色
+    assert merge[2] is True             # 移动1->2 同色共享端点
+    assert merge[3] is False            # G0 颜色不同
+    assert merge[4] is False            # F2000 颜色不同
+    # 隐藏 G0: 重建后 G0 不可见
+    app.show_g0.set(False)
+    app._on_show_g0_toggle()
+    visible, colors, merge = app._render_meta
+    assert visible[3] is False
+    assert merge[4] is False
+    # 共享 fixture: 恢复显示 G0 (否则污染后续测试)
+    app.show_g0.set(True)
+    app._on_show_g0_toggle()
+
+
+def test_render_polyline_merge_structure(app, tmp_path):
+    """渲染折线按颜色+共享端点合并: 同色连续段合成一条 (结构回归保护)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG01X20Y0\nG01X20Y10F2000\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.render()
+    # 首条从原点出发被跳过; 移动1 单条折线, 移动2 不同色另起
+    assert len(app._path_items) == 2
+    # 每条折线 2 点 4 坐标 (共享点跳过不改变输出结构)
+    for item in app._path_items:
+        assert len(app.canvas.coords(item)) == 4
+
+
+def test_drag_frame_skips_proj_cache_write(app, tmp_path):
+    """拖动帧 (旋转中) 不写投影缓存, 释放后的最终帧才写 (缓存策略回归)"""
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\nG01X20Y0\n", encoding="utf-8")
+    app.open_file(str(p))
+    app.render()
+    app._proj_cache = None
+    app._rot_data = (0, 0)
+    app.render()                       # 拖动帧: 不写缓存
+    assert app._proj_cache is None
+    app._rot_data = None
+    app.render()                       # 最终帧: 写缓存
+    assert app._proj_cache is not None
 
 
 def test_roll_mode_when_middle_press_off_path(app, tmp_path):

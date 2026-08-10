@@ -30,6 +30,8 @@ CLAUDE.md
 # 单独交付的说明文档, 不入库
 docs/加工时间计算.md
 
+# 打包加密密钥随产物存放于 dist/ (dist/ 已整体忽略)
+
 # Pillow 渲染实验原型 (不入库)
 原型-pillow/
 原型-qt/
