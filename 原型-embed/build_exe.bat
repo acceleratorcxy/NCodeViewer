@@ -92,18 +92,53 @@ if not "%PI_VER:~0,1%"=="5" (
 )
 :pi_ok
 
+REM --key 字节码加密依赖 tinyaes (AES 实现), 缺失时自动安装
+>nul 2>nul %PYCMD% -m pip show tinyaes
+if errorlevel 1 (
+    echo        未找到 tinyaes，正在安装 --key 字节码加密依赖 ...
+    %PYCMD% -m pip install tinyaes
+    if errorlevel 1 goto :fail
+)
+
+REM 加密密钥: NCVIEWER_KEY 环境变量覆盖, 否则每次打包重新生成
+REM (EXE 自包含解密, 密钥无需跨版本一致)。密钥随打包产物保存到
+REM dist\.ncviewer_key 与 EXE 放一起, 不入库 (dist 已被 git 忽略),
+REM 每次打包更新。
+REM 注: 用 goto 链而非 if 括号块, 括号块内 %KEY% 在解析时展开
+REM (尚未赋值) 会导致写入空值。
+if defined NCVIEWER_KEY (
+    set "KEY=%NCVIEWER_KEY%"
+    goto :key_ok
+)
+> "%TEMP%\ncv_key.txt" %PYCMD% -c "import secrets; print(secrets.token_hex(16))"
+for /f "usebackq delims=" %%k in ("%TEMP%\ncv_key.txt") do set "KEY=%%k"
+del /q "%TEMP%\ncv_key.txt" >nul 2>nul
+:key_ok
+
 echo [3/4] 清理旧构建产物 ...
 if exist build rmdir /s /q build
 if exist dist\NCViewer.exe del /q dist\NCViewer.exe
 
 echo [4/4] 正在打包 EXE (单文件, 不含样例文件, 图标 assets\NCodeViewer_icon.ico)...
+REM Qt 离屏渲染器经 versionFunctions() 运行时动态导入
+REM PyQt5.QtOpenGL / PyQt5._QOpenGLFunctions_2_0 (独立 .pyd),
+REM PyInstaller 静态分析发现不了, 必须显式 hidden-import,
+REM 否则打包版 Qt 渲染初始化失败回退 Tk 渲染
+set HIDDEN_IMPORTS=--hidden-import=PyQt5.QtOpenGL --hidden-import=PyQt5._QOpenGLFunctions_2_0
+REM 窗口图标数据内置 (--add-data): 运行时 _set_icon 从 _MEIPASS 读
+REM NCodeViewer_icon.ico 设置标题栏/二级窗口图标 (仅 --icon 只改 EXE
+REM 文件图标, 运行时窗口无图标)
+set ICON_DATA=--add-data "assets\NCodeViewer_icon.ico;assets"
 if defined HAS_UCRT (
     echo        检测到 conda 环境，内置 UCRT 运行时，支持裸装 Win7...
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" %HIDDEN_IMPORTS% %ICON_DATA% --key "%KEY%" --add-binary "%PY_PREFIX%\ucrtbase.dll;." --add-binary "%PY_PREFIX%\api-ms-win-crt-*.dll;." --add-binary "%PY_PREFIX%\vcruntime140.dll;." --add-binary "%PY_PREFIX%\vcruntime140_1.dll;." --clean launcher.py
 ) else (
-    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" --clean launcher.py
+    %PYCMD% -m PyInstaller --onefile --windowed --name NCViewer --paths src --icon "assets\NCodeViewer_icon.ico" %HIDDEN_IMPORTS% %ICON_DATA% --key "%KEY%" --clean launcher.py
 )
 if errorlevel 1 goto :fail
+
+REM 密钥随打包产物保存 (与 EXE 同目录, 不入库; 每次打包更新)
+echo %KEY%>"dist\.ncviewer_key" 2>nul
 
 echo.
 echo 打包完成！产物: %~dp0dist\NCViewer.exe

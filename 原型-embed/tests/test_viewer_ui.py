@@ -1687,12 +1687,27 @@ def test_run_to_target_instant(app, tmp_path):
     assert app.current_line == 2
 
 
-def test_demo_step_size_adaptive():
-    """演示步长: 距离 1/80 向上取整, 已过/到达停止"""
-    assert NCViewer._demo_step_size(100, 0) == 2
-    assert NCViewer._demo_step_size(5000, 0) == 63
-    assert NCViewer._demo_step_size(50, 100) == 0
-    assert NCViewer._demo_step_size(50, 50) == 0
+def test_demo_advances_like_play(app, tmp_path):
+    """演示到行与播放同速: 每帧合并推进 batch 行 (与 _play_tick 一致)
+
+    回归: 演示曾用"剩余距离 1/80"恒定步长, 远目标每帧推进十几行,
+    明显快于播放 (batch 行/帧), 两者绘制速度不一致。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y0F1000\n" * 10, encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    app._demo_target = 10
+    app._play_mode = "demo"
+    app.current_line = 0
+    app._demo_tick()                     # batch 默认 1: 每帧推进 1 行
+    assert app.current_line == 1
+    app._demo_tick()
+    assert app.current_line == 2
+    app.current_line = 9                 # 到达目标停
+    app._demo_tick()
+    assert app.current_line == 10
+    assert not app._trace_active or app._play_mode != "demo"
 
 
 def test_set_current_line_animate_light_path(app, tmp_path):
@@ -1758,3 +1773,149 @@ def test_trace_draws_progressively(app, tmp_path):
     assert app._trace_drawn == 3
     app.set_current_line(1, animate=True)     # 后退 -> 重绘回前导处
     assert app._trace_drawn == 1
+
+# ---------- Tk/Qt 双轨渲染隔离回归 ----------
+def test_qt_ready_tk_markers_not_drawn(app, tmp_path):
+    """[Qt 离屏] Qt 接管后 Tk 标记函数 no-op: 画布不产生标记图元
+
+    回归: _draw_axes/_draw_current/_draw_crosshair 曾被改成纯空壳 (连
+    fallback 一起废掉); 恢复 Tk 实现后必须用 _qt_ready 守卫, 否则 Tk
+    图元与离屏图片混叠打架。
+    """
+    import time
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nG01X30Y40\n", encoding="utf-8")
+    app.open_file(str(p))
+    for _ in range(10):
+        app.update()
+        time.sleep(0.05)
+        if getattr(app, "_qt_ready", False):
+            break
+    assert app._qt_ready
+    app.set_current_line(2)
+    app._draw_axes()
+    app._draw_current()
+    app._draw_crosshair(50, 50)
+    app._draw_tool_model()
+    for tag in ("axes", "axescorner", "cur", "curseg", "toolmodel", "curx"):
+        assert not app.canvas.find_withtag(tag), \
+            "Qt 接管时画布不应有 Tk 标记图元: %s" % tag
+
+
+def test_fallback_tk_markers_drawn_when_qt_unavailable(app, tmp_path,
+                                                        monkeypatch):
+    """[Tk 回退] OpenGL 不可用 (fallback) 时 Tk 标记绘制正常工作
+
+    回归: 空壳化曾让 fallback 渲染丢失轴/当前行标记。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nG01X30Y40\n", encoding="utf-8")
+    app.open_file(str(p))
+    monkeypatch.setattr(app, "_qt_ready", False)   # 模拟 OpenGL 不可用
+    app.set_current_line(2)
+    app._draw_axes()
+    assert app.canvas.find_withtag("axes"), "fallback 应画原点坐标系"
+    assert app.canvas.find_withtag("axescorner"), "fallback 应画左下角指示器"
+    app._draw_current()
+    assert app.canvas.find_withtag("cur"), "fallback 应画当前点/十字线"
+    assert app.canvas.find_withtag("curseg"), "fallback 应画当前段高亮"
+
+
+def test_qt_render_cleans_fallback_axis_residue(app, tmp_path, monkeypatch):
+    """[Qt 离屏] render() Qt 分支清理 fallback 轴图元残留
+
+    回归: 清理 tag 列表曾缺 axes/axescorner, fallback 轴图元留在画布
+    上与离屏图片混叠。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nG01X30Y40\n", encoding="utf-8")
+    app.open_file(str(p))
+    monkeypatch.setattr(app, "_qt_ready", False)   # 造 fallback 残留
+    app._draw_axes()
+    assert app.canvas.find_withtag("axes")
+    monkeypatch.undo()               # 恢复 Qt 接管
+    app._renderer.set_result(app.result, app.palette)   # 确保 VBO 就绪
+    app.render()                     # Qt 分支应清理 fallback 残留
+    assert not app.canvas.find_withtag("axes")
+    assert not app.canvas.find_withtag("axescorner")
+
+
+def test_play_line_synced_to_move_line(app, tmp_path):
+    """[Qt 离屏] 播放行号修正: 文件含注释行时推进到有移动的行
+
+    回归: 行号落在注释/空行上时, 刀具/十字线停留在旧位置, 慢于刀路
+    出现 (刀具落后于轨迹)。
+    """
+    p = tmp_path / "t.nc"
+    p.write_text("; 头注释\n; 空行\nG01X10Y10F1000\nG01X30Y40\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    app._trace_begin()
+    app._play_mode = "play"
+    app._play_tick()                 # 从行 1 推进
+    assert app.current_line == 3, "应修正到第一个有移动的行 (行 3)"
+    assert app._trace_drawn == 2, "刀路应画到行 3 最后移动"
+
+
+def test_tool_toggle_works_in_trace_mode(app, tmp_path):
+    """轨迹模式 (播放后) 勾掉"显示刀具": 渲染器同步关闭刀具
+
+    回归: 轨迹模式切换走 _trace_redraw -> _qt_render (不经过 _qt_sync_data),
+    渲染器 _show_tool 未更新, 画布内刀具依然显示。
+    """
+    import time
+    p = tmp_path / "t.nc"
+    p.write_text("G01X10Y20F1000\nG01X30Y40\n", encoding="utf-8")
+    app.open_file(str(p))
+    for _ in range(10):
+        app.update()
+        time.sleep(0.05)
+        if getattr(app, "_qt_ready", False):
+            break
+    assert app._qt_ready
+    app.tool = Tool("ball", {"d": 10, "r": 5, "l": 30})
+    app.show_tool.set(True)
+    app._trace_begin()               # 进入轨迹模式 (播放/演示后状态)
+    app.show_tool.set(False)         # 轨迹模式下勾掉
+    app._view_refresh()
+    assert not app._renderer._show_tool, "轨迹模式切换后渲染器应关闭刀具"
+    app.show_tool.set(True)
+    app._view_refresh()
+    assert app._renderer._show_tool, "重新勾选后渲染器应恢复刀具"
+
+
+def test_qt_highlight_skips_lead_and_hidden_g0(app, tmp_path, monkeypatch):
+    """[Qt 离屏] 当前段高亮检查: 前导跳过段/隐藏 G0 不传高亮移动
+
+    回归: Qt overlay 曾直接用 move_by_line[当前行] 高亮, 缺前导/过滤/
+    隐藏 G0 检查 —— 会高亮一条不显示的刀路。
+    """
+    import time
+    p = tmp_path / "t.nc"
+    p.write_text("G0X10Y10\nG01X20Y20F1000\nG0X50Y50\nG01X60Y60F2000\n",
+                 encoding="utf-8")
+    app.open_file(str(p))
+    for _ in range(10):
+        app.update()
+        time.sleep(0.05)
+        if getattr(app, "_qt_ready", False):
+            break
+    assert app._qt_ready
+    got = {}
+    orig = app._renderer.render
+
+    def spy(*a, **k):
+        got.update(k)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(app._renderer, "render", spy)
+    app.show_g0.set(True)
+    app.set_current_line(1)            # 前导跳过段 (从原点出发的 G0)
+    assert got.get("highlight_move") is None, "前导段不应高亮"
+    app.set_current_line(2)            # 普通切削
+    assert got.get("highlight_move") is not None, "切削移动应高亮"
+    app.set_current_line(3)            # 中部 G0: 显示 G0 时可高亮
+    assert got.get("highlight_move") is not None
+    app.show_g0.set(False)
+    app.set_current_line(3)            # 隐藏 G0: 不高亮
+    assert got.get("highlight_move") is None, "隐藏 G0 不应高亮"

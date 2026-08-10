@@ -43,6 +43,24 @@ from .tool import (TOOL_SPECS, Tool, parse_aptsource_tool, tool_full_profile,
 _UNSET = object()              # 哨兵: _fill_stats 时间统计未显式指定
 
 
+def _icon_path():
+    """定位窗口图标文件: 打包后为资源目录 (_MEIPASS, build_exe.bat
+    以 --add-data 内置), 开发时为项目 assets"""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "NCodeViewer_icon.ico")
+    root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "assets", "NCodeViewer_icon.ico")
+
+
+def _set_icon(win):
+    """设置窗口标题栏图标 (主窗口/各级二级窗口, 全局生效); 无图标或失败静默"""
+    try:
+        win.iconbitmap(_icon_path())
+    except tk.TclError:
+        pass
+
+
 def _sample_dir():
     """定位样例文件目录（仅本地开发/测试用，不打包进 EXE）。
 
@@ -155,6 +173,7 @@ class NCViewer(tk.Tk):
         theme.apply_theme(self)
         self.configure(bg=theme.BG)
         self.title("NC 刀路查看器")
+        _set_icon(self)                    # 窗口标题栏图标 (各级窗口生效)
         self.geometry("1280x820")
         # 默认最大化打开 (Win7 支持 state zoomed)
         self.state("zoomed")
@@ -716,16 +735,31 @@ class NCViewer(tk.Tk):
         """Qt 离屏渲染 -> PhotoImage -> canvas 显示"""
         if not self._qt_ready or not self.result or not self.result.moves:
             return
+        # 每次渲染前同步刀具状态: 轨迹模式 (播放/演示) 的切换走
+        # _trace_redraw -> 本函数, 不经过 _qt_sync_data, 否则
+        # 勾掉"显示刀具"后 overlay 仍画刀具 (set_tool 只是属性赋值, 无副作用)
+        self._renderer.set_tool(self.tool, self.show_tool.get())
         W = max(self.canvas.winfo_width(), 100)
         H = max(self.canvas.winfo_height(), 100)
         if W < 50 or H < 50:
             return
+        # 当前段高亮: 仅可高亮的移动 (前导跳过/段过滤/隐藏 G0 不高亮,
+        # 否则 overlay 会高亮一条不显示的刀路)
+        hl = None
+        if self.current_line is not None:
+            m = getattr(self, "_move_by_line", {}).get(self.current_line)
+            if m is not None:
+                idx = self._move_index.get(id(m))
+                if idx is not None:
+                    if not (m.motion == "G0" and not self.show_g0.get()
+                            or idx < self._lead_skip
+                            or self._move_filtered(idx)):
+                        hl = m
         img = self._renderer.render(
             self.quat, self.scale, self.offset, W, H,
             trace_drawn=(self._trace_drawn if self._trace_active else None),
             current_line=self.current_line,
-            move_by_line=getattr(self, "_move_by_line", {}),
-            result=self.result)
+            result=self.result, highlight_move=hl)
         # FBO 读回为 ARGB32 (4 字节/像素 BGRA), 转 RGB888 再给 PIL。
         # QImage 扫描行有 4 字节对齐 padding (bytesPerLine != W*3),
         # 连续读取会逐行错位成 45 度斜线, 必须按 stride 逐行取
@@ -751,12 +785,13 @@ class NCViewer(tk.Tk):
             self.canvas.itemconfig(self._img_item, image=self._photo)
 
     def _qt_sync_data(self):
-        """数据变化 (加载/段过滤/G0/刀具) 时重建 VBO"""
+        """数据变化 (加载/段过滤/G0/刀具/前导跳过) 时重建 VBO"""
         if not self._qt_ready or not self.result:
             return
         self._renderer.set_result(self.result, self.palette,
                                   seg_filter=self._seg_filter,
-                                  show_g0=self.show_g0.get())
+                                  show_g0=self.show_g0.get(),
+                                  lead_skip=self._lead_skip)
         self._renderer.set_tool(self.tool, self.show_tool.get())
         self._qt_render()
 
@@ -1417,6 +1452,7 @@ class NCViewer(tk.Tk):
         st = compute_stats(self.result)
         win = tk.Toplevel(self)
         win.title(f"程序详情 — {os.path.basename(self._current_path)}")
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.configure(bg=theme.BG)
         win.geometry("560x520")
         frm = ttk.Frame(win, padding=12, style="Panel.TFrame")
@@ -1480,6 +1516,7 @@ class NCViewer(tk.Tk):
             return
         win = tk.Toplevel(self)
         win.title(f"F 进给趋势 — {os.path.basename(self._current_path)}")
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.configure(bg=theme.BG)
         win.geometry("860x480")
         win.minsize(520, 340)
@@ -1795,11 +1832,12 @@ class NCViewer(tk.Tk):
         return pts
 
     def _draw_tool_model(self):
-        """[Qt 离屏] 3D 刀具模型由离屏 overlay 绘制"""
+        """3D 刀具模型: [Qt 离屏] 仅同步刀具数据 (渲染由调用方统一进行,
+        避免与 _qt_render 重复调用); 此 Tk 实现仅 OpenGL 不可用时的回退
+        渲染使用。"""
         if self._qt_ready:
             self._renderer.set_tool(self.tool, self.show_tool.get())
-            self._qt_render()
-        return
+            return
         if not self.show_tool.get() or not self.tool or not self.result:
             return
         tool = self.tool
@@ -1850,6 +1888,7 @@ class NCViewer(tk.Tk):
         tool = self.tool
         win = tk.Toplevel(self)
         win.title(f"刀具剖面图 — {tool_summary(tool)}")
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.configure(bg=theme.BG)
         win.geometry("480x520")
         win.minsize(320, 360)
@@ -1966,6 +2005,7 @@ class NCViewer(tk.Tk):
         """自定义窗口: 选择类型 -> 对应规格输入框 -> 应用/恢复自动解析"""
         win = tk.Toplevel(self)
         win.title("刀具自定义")
+        _set_icon(win)              # 二级窗口图标 (全局生效)
         win.configure(bg=theme.BG)
         win.geometry("380x340")
         frm = ttk.Frame(win, padding=12, style="Panel.TFrame")
@@ -2143,11 +2183,13 @@ class NCViewer(tk.Tk):
         if self._qt_ready:
             # 清理 Tk 回退渲染残留图元 (离屏图片接管后 overlay 由 Qt 绘制,
             # 残留图元会混叠/干扰查找; 图片项无 tag 不受影响)
-            for tag in ("path", "cur", "curx", "curseg", "toolmodel"):
+            for tag in ("path", "cur", "curx", "curseg", "toolmodel",
+                        "axes", "axescorner"):
                 self.canvas.delete(tag)
-            # 数据版本: 加载/段过滤/G0/刀具/刀具开关变化才重建 VBO (旋转只渲染)
+            # 数据版本: 加载/段过滤/G0/刀具/刀具开关/前导跳过变化才重建
+            # VBO (旋转只渲染)
             key = (id(self.result), self._seg_filter, self.show_g0.get(),
-                   id(self.tool), self.show_tool.get())
+                   id(self.tool), self.show_tool.get(), self._lead_skip)
             if key != getattr(self, "_qt_data_key", None):
                 self._qt_sync_data()
                 self._qt_data_key = key
@@ -2243,7 +2285,7 @@ class NCViewer(tk.Tk):
 
         # 标记类图元数量小, 删除重建; 旋转拖动中跳过 (每帧重建 ~15ms,
         # 刀路保持完整, 标记在释放后的最终帧恢复)
-        self.canvas.delete("axes", "cur", "curseg", "toolmodel")
+        self.canvas.delete("axes", "axescorner", "cur", "curseg", "toolmodel")
         if self._rot_data is None:
             self._draw_axes()
             self._draw_current()
@@ -2263,12 +2305,51 @@ class NCViewer(tk.Tk):
             pass
 
     def _draw_axes(self):
-        """[Qt 离屏] XYZ 轴由离屏 overlay 绘制"""
-        pass
+        """原点坐标系 + 左下角指示器。
+
+        [Qt 离屏] 由 overlay 绘制 (直接返回); 此 Tk 实现仅 OpenGL 不可用
+        时的回退渲染使用 (与主程序一致: 原点大坐标系 90px + 左下角 34px)。
+        """
+        if self._qt_ready:
+            return
+        q = self.quat
+        axes = (("X", "#ff5555", (1, 0, 0)),
+                ("Y", "#55ff55", (0, 1, 0)),
+                ("Z", "#55ffff", (0, 0, 1)))
+        ox, oy = self.world_to_canvas(*project((0, 0, 0), q))
+        for axis, color, vec in axes:
+            a, b = project(vec, q)
+            ex, ey = ox + a * 90, oy - b * 90
+            self.canvas.create_line(ox, oy, ex, ey, fill=color, width=2,
+                                    tags="axes")
+            self._arrow_at(ex, ey, a * 48, b * 48, color=color, size=12,
+                           tags="axes")
+            self.canvas.create_text(ex + a * 18, ey - b * 18, text=axis,
+                                    fill=color, font=("", 11, "bold"),
+                                    tags="axes")
+        self.canvas.create_oval(ox - 5, oy - 5, ox + 5, oy + 5,
+                                outline="#ffffff", width=1, tags="axes")
+        ch = self.canvas.winfo_height()
+        cx, cy = 62, ch - 56
+        for axis, color, vec in axes:
+            a, b = project(vec, q)
+            ex, ey = cx + a * 34, cy - b * 34
+            self.canvas.create_line(cx, cy, ex, ey, fill=color, width=2,
+                                    tags="axescorner")
+            self._arrow_at(ex, ey, a * 26, b * 26, color=color, size=9,
+                           tags="axescorner")
+            self.canvas.create_text(ex + a * 13, ey - b * 13, text=axis,
+                                    fill=color, font=("", 10, "bold"),
+                                    tags="axescorner")
 
     def _draw_current(self):
-        """[Qt 离屏] 当前行标记由离屏 overlay 绘制"""
-        pass
+        """当前行标记 (高亮/方向箭头/十字线/当前点)。
+
+        [Qt 离屏] 由 overlay 绘制 (直接返回); 此 Tk 实现仅 OpenGL 不可用
+        时的回退渲染使用。
+        """
+        if self._qt_ready:
+            return
         if self.current_line is None:
             return
         q = self.quat
@@ -2300,8 +2381,19 @@ class NCViewer(tk.Tk):
                                 fill=CUR_COLOR, outline="#000000", width=2, tags="cur")
 
     def _draw_crosshair(self, cx, cy):
-        """[Qt 离屏] 十字虚线由离屏 overlay 绘制"""
-        pass
+        """当前位置十字虚线: 铺满可视区两端 (平移把图元移出边界, 需重铺)。
+
+        [Qt 离屏] 由 overlay 绘制 (直接返回); 此 Tk 实现仅回退渲染使用。
+        """
+        if self._qt_ready:
+            return
+        self.canvas.delete("curx")
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        self.canvas.create_line(cx, 0, cx, ch, fill=CUR_LINE_COLOR,
+                                dash=(4, 4), tags=("cur", "curx"))
+        self.canvas.create_line(0, cy, cw, cy, fill=CUR_LINE_COLOR,
+                                dash=(4, 4), tags=("cur", "curx"))
 
     def _draw_move_direction(self, pts):
         """沿当前段路径绘制箭头, 表示刀具加工方向。
@@ -2332,7 +2424,7 @@ class NCViewer(tk.Tk):
                 nx, ny = pts[-1]
             self._arrow_at(x, y, nx - x, ny - y)
 
-    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=14):
+    def _arrow_at(self, x, y, dx, dy, color=CUR_COLOR, size=14, tags="cur"):
         """在 (x,y) 处画一个指向 (dx,dy) 方向的实心三角箭头 (带深色描边, 醒目)"""
         L = math.hypot(dx, dy)
         if L < 1e-6:
@@ -2345,7 +2437,7 @@ class NCViewer(tk.Tk):
         b2x = x - ux * size - px * size * 0.55
         b2y = y - uy * size - py * size * 0.55
         self.canvas.create_polygon(x, y, b1x, b1y, b2x, b2y,
-                                   fill=color, outline="#000000", width=1, tags="cur")
+                                   fill=color, outline="#000000", width=1, tags=tags)
 
     # ------------- 交互: 平移/缩放 + 点击拾取 -------------
     PICK_MAX_PX = 12.0        # 拾取/旋转吸附模型点的最大像素距离
@@ -2414,6 +2506,8 @@ class NCViewer(tk.Tk):
         self.current_line = None
         self.canvas.delete("cur", "curseg", "toolmodel")
         self._draw_tool_model()           # 无当前行时刀具模型回退到原点显示
+        if self._qt_ready:
+            self._qt_render()             # 离屏画面更新 (刀具回退原点)
         self.code.tag_remove("cur", "1.0", "end")
         self.code.tag_remove("viewline", "1.0", "end")
         self._reset_pick_time()           # 加工时间恢复默认 (勾选段/全程序)
@@ -3038,6 +3132,16 @@ class NCViewer(tk.Tk):
         self.play_btn.config(text="暂停")
         self._play_tick()
 
+    def _sync_move_line(self, ln, lo, hi):
+        """把行号修正到 ≥ln 的第一个有移动的行 (段内); 段内无则停段内
+        最后一个移动行。文件行号不连续 (注释/空行) 时, 当前行落在无移动
+        行上会让刀具/十字线停留在旧位置, 慢于刀路出现。"""
+        k = bisect.bisect_left(self._move_lines, ln)
+        if k < len(self._move_lines) and self._move_lines[k] <= hi:
+            return self._move_lines[k]
+        k2 = bisect.bisect_right(self._move_lines, hi)
+        return self._move_lines[k2 - 1] if k2 > 0 else ln
+
     def _play_tick(self):
         if self._play_mode != "play":
             return
@@ -3053,6 +3157,7 @@ class NCViewer(tk.Tk):
             self._stop_playback()
             return
         ln = min(base_line + self._batch_lines(), hi)
+        ln = self._sync_move_line(ln, lo, hi)   # 修正到有移动的行
         n = max(bisect.bisect_right(self._move_lines, ln),
                 self._trace_drawn + 1)   # 至少推进一个移动 (行内多移动)
         self._trace_drawn = n
@@ -3071,6 +3176,7 @@ class NCViewer(tk.Tk):
         lo, hi = self._seg_line_bounds()
         base = self.current_line if self.current_line else lo - 1
         ln = max(lo, min(hi, base + delta))
+        ln = self._sync_move_line(ln, lo, hi)   # 修正到有移动的行
         self.set_current_line(ln, animate=True)
         self._update_play_progress()     # 单步推进也按加工时间更新进度
 
@@ -3113,31 +3219,27 @@ class NCViewer(tk.Tk):
             self.set_current_line(target, animate=True)   # 无动态: 直接画到该行
             return
         self._demo_target = target                 # 有动态: 逐帧演示推进
-        cur = self.current_line if self.current_line else 0
-        self._demo_step = self._demo_step_size(target, cur)   # 恒定步长
         self._play_mode = "demo"
         self.play_btn.config(text="暂停")
         self._demo_tick()
 
-    @staticmethod
-    def _demo_step_size(target, cur):
-        """演示起始步长: 剩余距离的 1/80 向上取整 (至少 1), 全程恒定,
-        保证 ≤80 帧精确到达; 已到达/已越过返回 0 (停止)"""
-        dist = target - cur
-        if dist <= 0:
-            return 0
-        return max(1, (dist + 79) // 80)
-
     def _demo_tick(self):
+        """演示逐帧推进: 与播放同速 (每帧合并推进 batch 行, 同一速度档),
+        保证"演示到行"与"播放"的刀路绘制速度一致"""
         if self._play_mode != "demo":
             return
-        cur = self.current_line if self.current_line else 0
+        lo, hi = self._seg_line_bounds()
+        cur = self.current_line if self.current_line else lo - 1
         if cur >= self._demo_target:
             self.set_current_line(self._demo_target, animate=True)
             self._stop_playback()
             return
-        ln = min(cur + self._demo_step, self._demo_target)
+        ln = min(cur + self._batch_lines(), self._demo_target)
+        ln = self._sync_move_line(ln, lo, hi)   # 修正到有移动的行 (同播放)
         self.set_current_line(ln, animate=True)
+        if ln >= self._demo_target:      # 推进恰好到达目标: 停
+            self._stop_playback()
+            return
         self._update_play_progress()     # 演示逐帧推进时同步加工时间进度
         self._play_job = self.after(self._play_speed_ms(), self._demo_tick)
 
@@ -3169,9 +3271,7 @@ class NCViewer(tk.Tk):
         """[Qt 离屏] 重绘已画轨迹: 维持已执行数, 重新渲染"""
         drawn = self._trace_drawn
         self._trace_drawn = self._trace_base()
-        self._trace_draw_to(drawn - 1)
-        if self.current_line is not None:
-            self._draw_tool_model()
+        self._trace_draw_to(drawn - 1)    # 渲染含刀具 (trace_drawn 同步), 不重复调
 
     def _trace_draw_to(self, k):
         """[Qt 离屏] 增量绘制移动 0..k: 只维护已执行数, 渲染由离屏裁剪。

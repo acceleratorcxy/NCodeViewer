@@ -3,7 +3,7 @@
 
 覆盖: 全量 VBO 构建 (不抽稀)、移动级段数映射 (seg_map 逐移动精确,
 回归"一段颜色执行完才显示"bug)、G0 过滤、渲染帧尺寸与格式、
-FBO 随画布尺寸重建、空程序容错。
+FBO 随画布尺寸重建、空程序容错、渲染帧内容非空 (刀路像素回归)。
 """
 import pytest
 
@@ -111,6 +111,31 @@ def test_render_frame_size_and_format(renderer):
     assert img.width() == 320
     assert img.height() == 200
     assert not img.isNull()
+
+
+def test_render_frame_has_toolpath_pixels(renderer):
+    """渲染帧内容非空: 帧里真的画出刀路 (非背景像素 > 0)
+
+    回归: 曾出现渲染帧全为背景色 (VBO 未画出刀路), 但测试只断言
+    尺寸/非空, 全部通过 —— 空帧盲区 (用户肉眼发现"打开后没刀路")。
+    用屏幕中心 offset 渲染 (NC_MERGE 模型 X 0~50 居中到画面内),
+    帧内必须有非背景色像素 (刀路线 + XYZ 轴 overlay)。
+    """
+    import numpy as np
+    from nc_viewer.geometry import BG_COLOR
+    res = _res()
+    renderer.set_result(res, build_palette(res.feeds))
+    W, H = 320, 200
+    img = renderer.render((1.0, 0.0, 0.0, 0.0), 1.0, (W / 2.0, H / 2.0), W, H)
+    img = img.convertToFormat(img.Format_RGB888)
+    bpl = img.bytesPerLine()
+    data = bytes(img.bits().asstring(bpl * H))
+    arr = np.frombuffer(data, dtype=np.uint8).reshape(H, bpl)[:, :W * 3]
+    arr = arr.reshape(H, W, 3)
+    bg = np.array([int(BG_COLOR[1:3], 16), int(BG_COLOR[3:5], 16),
+                   int(BG_COLOR[5:7], 16)])
+    nonbg = (np.abs(arr.astype(int) - bg).sum(axis=2) > 30).sum()
+    assert nonbg > 0
 
 
 def test_render_fbo_rebuild_on_resize(renderer):
